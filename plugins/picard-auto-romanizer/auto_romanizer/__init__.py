@@ -2,7 +2,7 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. Conserva títulos que ya tienen traducción al inglés/Romaji."
-PLUGIN_VERSION = "3.10"
+PLUGIN_VERSION = "3.11"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
@@ -79,10 +79,13 @@ def _clean_internal_tags(metadata):
 
 
 def _get_file_dual_title(track):
-    """Returns the existing dual-language title from the file on disk, or None."""
-    if not (track and hasattr(track, 'files')):
+    """Returns the existing dual-language title from the file on disk, or None.
+    Uses track.linked_files which is the correct Picard API attribute.
+    """
+    files = getattr(track, 'linked_files', None) or getattr(track, 'files', None)
+    if not files:
         return None
-    for f in track.files:
+    for f in files:
         file_title = f.metadata.get('title') if hasattr(f, 'metadata') else None
         filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
         clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
