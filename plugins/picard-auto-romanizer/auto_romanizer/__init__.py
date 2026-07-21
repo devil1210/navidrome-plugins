@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
-PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. Conserva títulos que ya tienen traducción al inglés/Romaji."
-PLUGIN_VERSION = "3.12"
-PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
+PLUGIN_DESCRIPTION = (
+    "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji "
+    "preservando metadatos originales. En modo Automático conserva títulos que "
+    "ya tienen traducción al inglés/Romaji desde el archivo original."
+)
+PLUGIN_VERSION = "3.13"
+PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
+                       "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
 import os
@@ -22,8 +27,16 @@ PYTHON_PATH = r"python"
 
 TITLE_MODE_OPTION = "auto_romanizer_title_mode"
 DEFAULT_MODE = "auto"
-LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed', 'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'}
+
+LATIN_META_WORDS = {
+    'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed',
+    'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'
+}
 _JP_RE = re.compile(r'[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]')
+
+# ── Cache: base-japanese-title → full dual title from original file ──────────
+# Built when files are loaded into Picard, BEFORE the MusicBrainz lookup runs.
+_title_cache = {}   # e.g. {'プラネタリウム': 'プラネタリウム - Planetarium'}
 
 
 def contains_japanese(text):
@@ -48,6 +61,65 @@ def already_has_latin_translation(text):
     return has_jp and has_latin
 
 
+def _extract_base_jp(text):
+    """Return the core Japanese words before any version/qualifier suffixes.
+
+    'プラネタリウム - Planetarium'  → 'プラネタリウム'
+    '帰りたくなったよ -acoustic version-' → '帰りたくなったよ'
+    """
+    if not text:
+        return None
+    m = _JP_RE.search(text)
+    if not m:
+        return None
+    jp_onwards = text[m.start():]
+    # Cut at a whitespace-preceded '-' or '(' that starts a qualifier
+    base = re.split(r'\s+[\-\(]', jp_onwards)[0].strip()
+    return base if contains_japanese(base) else None
+
+
+def _cache_dual_title(dual_title):
+    """Add a confirmed dual-language title to the lookup cache."""
+    if not dual_title or not already_has_latin_translation(dual_title):
+        return
+    key = _extract_base_jp(dual_title)
+    if key and key not in _title_cache:
+        _title_cache[key] = dual_title
+        log.debug("Auto Romanizer cache: %r → %r", key, dual_title)
+
+
+def _cache_file(file_):
+    """Called when a file is loaded. Caches its original dual title if present."""
+    # 1. From the embedded metadata tag
+    for attr in ('orig_metadata', 'metadata'):
+        meta = getattr(file_, attr, None)
+        if meta:
+            _cache_dual_title(meta.get('title', ''))
+
+    # 2. From the filename itself (e.g. "01 - Artist - プラネタリウム - Planetarium.m4a")
+    if hasattr(file_, 'filename'):
+        basename = os.path.splitext(os.path.basename(file_.filename))[0]
+        # Strip leading track-number
+        clean = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
+        # Find where Japanese starts and take from there
+        m = _JP_RE.search(clean)
+        if m:
+            jp_onwards = clean[m.start():]
+            _cache_dual_title(jp_onwards)
+
+
+# Register the file post-load hook (Picard 2.6+).  Fail silently if unavailable.
+try:
+    from picard.plugin import register_file_post_load_processor
+    register_file_post_load_processor(_cache_file)
+    log.debug("Auto Romanizer: file_post_load_processor registered")
+except (ImportError, AttributeError):
+    log.debug("Auto Romanizer: register_file_post_load_processor not available – "
+              "auto mode will fall back to dual (Romaji) when no cache hit")
+
+
+# ── Romanization helper ───────────────────────────────────────────────────────
+
 def romanize_dict(tags_dict):
     if not os.path.exists(SCRIPT_PATH):
         return tags_dict
@@ -55,7 +127,8 @@ def romanize_dict(tags_dict):
         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         proc = subprocess.Popen(
             [PYTHON_PATH, SCRIPT_PATH, "--json-dict", json.dumps(tags_dict)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creationflags
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=creationflags
         )
         out, err = proc.communicate(timeout=5)
         if not out:
@@ -73,42 +146,19 @@ def romanize_dict(tags_dict):
 
 
 def _clean_internal_tags(metadata):
-    for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
+    for k in ('_original_title', '_original_artist',
+              '_original_album', '_original_albumartist'):
         if k in metadata:
             del metadata[k]
 
 
-def _get_file_dual_title(track):
-    """Reads the original file tags (orig_metadata) before MusicBrainz overwrites them.
-    Returns the dual-language title if found, otherwise None.
-    """
-    files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
-    log.debug("Auto Romanizer: _get_file_dual_title called, files=%s", files)
-    if not files:
-        return None
-    for f in files:
-        # orig_metadata = tags from disk before MusicBrainz processing
-        # metadata = already overwritten by MusicBrainz at this point
-        orig = getattr(f, 'orig_metadata', None) or getattr(f, 'metadata', None)
-        if orig is None:
-            continue
-        file_title = orig.get('title', '')
-        filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
-        clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
-        log.debug("Auto Romanizer: checking file=%s title=%s filename=%s", f.filename, file_title, clean_name)
-        if file_title and already_has_latin_translation(file_title):
-            log.debug("Auto Romanizer: found dual title in orig_metadata: %s", file_title)
-            return file_title
-        if clean_name and already_has_latin_translation(clean_name):
-            log.debug("Auto Romanizer: found dual title in filename: %s", clean_name)
-            return clean_name
-    return None
-
+# ── Metadata processors ───────────────────────────────────────────────────────
 
 def process_track(tagger, metadata, track, release):
-    mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
+    mode = config.setting[TITLE_MODE_OPTION] \
+        if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
 
-    # Guardar originales
+    # Preserve originals before we touch anything
     if metadata.get('title') and 'originaltitle' not in metadata:
         metadata['originaltitle'] = metadata['title']
     if metadata.get('artist') and 'originalartist' not in metadata:
@@ -117,36 +167,41 @@ def process_track(tagger, metadata, track, release):
         metadata['originalalbum'] = metadata['album']
     _clean_internal_tags(metadata)
 
-    # Aplicar modo de conversión al título
     orig_title = metadata.get('title', '')
     if orig_title and contains_japanese(orig_title):
         if mode == "auto":
-            # Usar el tag original del archivo si ya tiene traducción (ej: プラネタリウム - Planetarium)
-            file_dual = _get_file_dual_title(track)
-            if file_dual:
-                metadata['title'] = file_dual
-                metadata['originaltitle'] = file_dual
+            # Look up cache by the base Japanese part of the MusicBrainz title.
+            # The cache was built when the files were loaded from disk.
+            key = _extract_base_jp(orig_title) or orig_title
+            cached_dual = _title_cache.get(key)
+            log.debug("Auto Romanizer auto-mode: key=%r cache_hit=%r", key, cached_dual)
+            if cached_dual:
+                metadata['title'] = cached_dual
+                metadata['originaltitle'] = cached_dual
             else:
-                # Sin traducción en el archivo: generar dual (Japonés - Romaji)
+                # No cached original – generate dual (Japonés - Romaji)
                 result = romanize_dict({'title': orig_title})
                 romaji = result.get('title', orig_title)
                 if romaji and romaji != orig_title:
                     metadata['title'] = "{} - {}".format(orig_title, romaji)
+
         elif mode == "japanese":
-            pass  # Conservar japonés sin cambiar
+            pass  # Leave Japanese title untouched
+
         elif mode == "dual":
             result = romanize_dict({'title': orig_title})
             romaji = result.get('title', orig_title)
             if romaji and romaji != orig_title:
                 metadata['title'] = "{} - {}".format(orig_title, romaji)
+
         else:  # romaji
             result = romanize_dict({'title': orig_title})
             if 'title' in result:
                 metadata['title'] = result['title']
 
-    # Convertir artista/álbum siempre a Romaji
+    # Artist / album – always convert to Romaji regardless of mode
     to_convert = {}
-    for k in ['artist', 'album', 'albumartist']:
+    for k in ('artist', 'album', 'albumartist'):
         v = metadata.get(k)
         if v and contains_japanese(v):
             to_convert[k] = v
@@ -164,7 +219,7 @@ def process_album(tagger, metadata, release):
     _clean_internal_tags(metadata)
 
     to_convert = {}
-    for k in ['title', 'album', 'albumartist']:
+    for k in ('title', 'album', 'albumartist'):
         v = metadata.get(k)
         if v and contains_japanese(v):
             to_convert[k] = v
@@ -173,6 +228,8 @@ def process_album(tagger, metadata, release):
         for k, v in converted.items():
             metadata[k] = v
 
+
+# ── Options page ──────────────────────────────────────────────────────────────
 
 class AutoRomanizerOptionsPage(OptionsPage):
     NAME = "auto_romanizer"
@@ -185,17 +242,25 @@ class AutoRomanizerOptionsPage(OptionsPage):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Lazy import de Qt para no crashear en module load
-        from PyQt5 import QtWidgets
+        from PyQt5 import QtWidgets  # lazy – avoid module-level crash
 
         self.combo_mode = QtWidgets.QComboBox(self)
-        self.combo_mode.addItem("Automático: conservar tag original si ya tiene traducción (ej: プラネタリウム - Planetarium)", "auto")
-        self.combo_mode.addItem("Solo Romaji: convertir a Romaji (ej: Puranetariumu)", "romaji")
-        self.combo_mode.addItem("Dual: Japonés + Romaji generado (ej: プラネタリウム - Puranetariumu)", "dual")
-        self.combo_mode.addItem("Original: conservar Japonés sin cambiar (ej: プラネタリウム)", "japanese")
+        self.combo_mode.addItem(
+            "Automático: conservar tag original si ya tiene traducción "
+            "(ej: プラネタリウム - Planetarium)", "auto")
+        self.combo_mode.addItem(
+            "Dual: Japonés + Romaji generado "
+            "(ej: プラネタリウム - Puranetariumu)", "dual")
+        self.combo_mode.addItem(
+            "Solo Romaji: convertir a Romaji "
+            "(ej: Puranetariumu)", "romaji")
+        self.combo_mode.addItem(
+            "Original: conservar Japonés sin cambiar "
+            "(ej: プラネタリウム)", "japanese")
 
         form = QtWidgets.QFormLayout()
-        form.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"), self.combo_mode)
+        form.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"),
+                    self.combo_mode)
 
         group = QtWidgets.QGroupBox("Formato de Títulos en Japonés", self)
         group.setLayout(form)
@@ -205,7 +270,8 @@ class AutoRomanizerOptionsPage(OptionsPage):
         vbox.addStretch()
 
     def load(self):
-        mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
+        mode = config.setting[TITLE_MODE_OPTION] \
+            if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
         idx = self.combo_mode.findData(mode)
         if idx >= 0:
             self.combo_mode.setCurrentIndex(idx)
