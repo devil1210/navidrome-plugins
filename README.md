@@ -21,8 +21,12 @@ navidrome-plugins/
 │   │   ├── providers/
 │   │   │   └── providers.go
 │   │   └── go.mod
-│   └── picard-auto-romanizer/  # Plugin MusicBrainz Picard: Romanizador automático (Kana/Kanji a Romaji)
-│       ├── auto_romanizer/
+│   ├── picard-auto-romanizer/  # Plugin MusicBrainz Picard: Romanizador automático (Kana/Kanji a Romaji)
+│   │   ├── auto_romanizer/
+│   │   │   └── __init__.py
+│   │   └── README.md
+│   └── picard-deduplicator/    # Plugin MusicBrainz Picard: Previene y limpia duplicados (1) al guardar
+│       ├── picard_deduplicator/
 │       │   └── __init__.py
 │       └── README.md
 ├── Makefile                    # Targets globales de compilación, empaquetado y despliegue

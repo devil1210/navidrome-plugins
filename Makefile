@@ -1,13 +1,15 @@
-.PHONY: all build-telegram build-lyrics build-all package package-telegram package-lyrics package-picard deploy clean
+.PHONY: all build-telegram build-lyrics build-all package package-telegram package-lyrics package-picard package-deduplicator deploy clean
 
 WASM_OUT := plugin.wasm
 TELEGRAM_DIR := plugins/telegram-plugin
 LYRICS_DIR := plugins/lyrics-plugin
 PICARD_DIR := plugins/picard-auto-romanizer
+DEDUP_DIR := plugins/picard-deduplicator
 
 TELEGRAM_NDP := navidrome-telegram.ndp
 LYRICS_NDP := navidrome-lyrics-plugin.ndp
 PICARD_ZIP := auto_romanizer.zip
+DEDUP_ZIP := picard_deduplicator.zip
 
 all: package
 
@@ -33,14 +35,20 @@ package-picard:
 	@echo "==> Packaging auto_romanizer.zip for MusicBrainz Picard..."
 	cd $(PICARD_DIR) && zip -r $(PICARD_ZIP) auto_romanizer
 
-package: package-telegram package-lyrics package-picard
+package-deduplicator:
+	@echo "==> Packaging picard_deduplicator.zip for MusicBrainz Picard..."
+	cd $(DEDUP_DIR) && zip -r $(DEDUP_ZIP) picard_deduplicator
+
+package: package-telegram package-lyrics package-picard package-deduplicator
 	@echo "Successfully packaged all plugins."
 
 deploy:
 	@bash scripts/deploy.sh $(DEST)
 
 clean:
-	@echo "Cleaning compiled WASM binaries, NDP packages, and Picard zip..."
+	@echo "Cleaning compiled WASM binaries, NDP packages, and Picard zips..."
 	rm -f $(TELEGRAM_DIR)/$(WASM_OUT) $(TELEGRAM_DIR)/$(TELEGRAM_NDP)
 	rm -f $(LYRICS_DIR)/$(WASM_OUT) $(LYRICS_DIR)/$(LYRICS_NDP)
 	rm -f $(PICARD_DIR)/$(PICARD_ZIP)
+	rm -f $(DEDUP_DIR)/$(DEDUP_ZIP)
+
