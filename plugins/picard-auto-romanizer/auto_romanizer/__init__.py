@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.18"
+PLUGIN_VERSION = "3.19"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -217,29 +217,28 @@ def process_track(tagger, metadata, track, release):
             dual = None
             key = _extract_base_jp(orig_title)
 
-            # 0. Check global file loading cache first (populated whenever files are loaded into Picard)
-            if key and key in _ORIGINAL_DUAL_CACHE:
+            # 0. Check linked files directly first (highest priority)
+            linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
+            for f in linked_files:
+                for attr in ('orig_metadata', 'metadata'):
+                    meta = getattr(f, attr, None)
+                    if not meta:
+                        continue
+                    t = meta.get('title', '')
+                    if isinstance(t, list) and t:
+                        t = t[0]
+                    if t and already_has_latin_translation(t):
+                        fk = _extract_base_jp(t)
+                        if fk and key and (fk == key or fk in key or key in fk):
+                            dual = t
+                            break
+                if dual:
+                    break
+
+            # 1. Check global file loading cache
+            if not dual and key and key in _ORIGINAL_DUAL_CACHE:
                 dual = _ORIGINAL_DUAL_CACHE[key]
                 log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE: %r for key=%r", dual, key)
-
-            # 1. Check if a file is already linked to this track and has a dual title
-            if not dual:
-                linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
-                for f in linked_files:
-                    for attr in ('orig_metadata', 'metadata'):
-                        meta = getattr(f, attr, None)
-                        if not meta:
-                            continue
-                        t = meta.get('title', '')
-                        if isinstance(t, list) and t:
-                            t = t[0]
-                        if t and already_has_latin_translation(t):
-                            fk = _extract_base_jp(t)
-                            if fk and key and (fk == key or fk in key or key in fk):
-                                dual = t
-                                break
-                    if dual:
-                        break
 
             # 2. Search unlinked files in tagger.files
             if not dual:
@@ -268,6 +267,23 @@ def process_track(tagger, metadata, track, release):
             result = romanize_dict({'title': orig_title})
             if 'title' in result:
                 metadata['title'] = result['title']
+
+    elif orig_title and not contains_japanese(orig_title):
+        # Non-Japanese track (e.g., "Message" or "Happy Smile Again")
+        if mode == "auto":
+            # If the linked file already has an original title in Latin (e.g. "Message"), preserve its original casing/formatting
+            linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
+            for f in linked_files:
+                for attr in ('orig_metadata', 'metadata'):
+                    meta = getattr(f, attr, None)
+                    if not meta:
+                        continue
+                    t = meta.get('title', '')
+                    if isinstance(t, list) and t:
+                        t = t[0]
+                    if t and t.lower().strip() == orig_title.lower().strip():
+                        metadata['title'] = t
+                        break
 
     # Artist / album – always convert to Romaji regardless of mode
     to_convert = {}
