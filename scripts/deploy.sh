@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-DEFAULT_DEST="lxc-120:/opt/docker/player-stack/config/navidrome/plugins/"
-DEST="${DEST:-${1:-$DEFAULT_DEST}}"
+DEST="${DEST:-${1:-$NAV_SERVER}}"
+
+if [ -z "$DEST" ]; then
+    echo "Error: Destination not specified."
+    echo "Usage: make deploy DEST=<user@host:/path/to/plugins> or ./scripts/deploy.sh <user@host:/path/to/plugins>"
+    exit 1
+fi
 
 TELEGRAM_NDP="plugins/telegram-plugin/navidrome-telegram.ndp"
 LYRICS_NDP="plugins/lyrics-plugin/navidrome-lyrics-plugin.ndp"
@@ -24,7 +29,4 @@ if [ -f "$LYRICS_NDP" ]; then
     scp "$LYRICS_NDP" "$DEST"
 fi
 
-echo "Restarting Navidrome container on lxc-120..."
-ssh lxc-120 "docker restart navidrome"
-
-echo "Deployment complete and Navidrome restarted successfully!"
+echo "Deployment complete!"
