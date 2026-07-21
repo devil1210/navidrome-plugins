@@ -2,27 +2,57 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales (ORIGINALTITLE, ORIGINALARTIST, ORIGINALALBUM) para búsqueda de letras sincronizadas."
-PLUGIN_VERSION = "3.5"
+PLUGIN_VERSION = "3.6"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
 from picard.metadata import register_track_metadata_processor, register_album_metadata_processor
+from picard.config import TextOption, config
+from picard.ui.options import OptionsPage, register_options_page
 from picard import log
+from PyQt5 import QtWidgets
 import subprocess
 import json
 import os
+import re
+
+TITLE_MODE_OPTION = "auto_romanizer_title_mode"
+config.register_option(TextOption("setting", TITLE_MODE_OPTION, "dual"))
 
 LOCAL_SCRIPT = os.path.join(os.path.dirname(__file__), "romanizer.py")
 SPBOT_SCRIPT = r"E:\Descargas\SPbot\scripts\romanizer.py"
 SCRIPT_PATH = LOCAL_SCRIPT if os.path.exists(LOCAL_SCRIPT) else SPBOT_SCRIPT
 PYTHON_PATH = r"python"
 
+LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed', 'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'}
+
 def contains_japanese(text):
+    if not text:
+        return False
     for char in text:
         cp = ord(char)
         if (0x3040 <= cp <= 0x309F) or (0x30A0 <= cp <= 0x30FF) or (0x4E00 <= cp <= 0x9FAF) or (0xFF00 <= cp <= 0xFFEF):
             return True
     return False
+
+def already_has_latin_translation(text):
+    if not text or not contains_japanese(text):
+        return False
+    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
+    if len(parts) < 2:
+        return False
+    has_jp = False
+    has_latin = False
+    for p in parts:
+        p_clean = p.strip()
+        if contains_japanese(p_clean):
+            has_jp = True
+        else:
+            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
+            non_meta = [w for w in words if w not in LATIN_META_WORDS]
+            if len(non_meta) >= 1:
+                has_latin = True
+    return has_jp and has_latin
 
 def romanize_dict(tags_dict):
     if not os.path.exists(SCRIPT_PATH):
@@ -46,31 +76,15 @@ def romanize_dict(tags_dict):
         log.error("Auto Romanizer Error: %s", e)
         return tags_dict
 
-import re
-
-LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed', 'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'}
-
-def already_has_latin_translation(text):
-    if not text or not contains_japanese(text):
-        return False
-    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
-    if len(parts) < 2:
-        return False
-    has_jp = False
-    has_latin = False
-    for p in parts:
-        p_clean = p.strip()
-        if contains_japanese(p_clean):
-            has_jp = True
-        else:
-            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
-            non_meta = [w for w in words if w not in LATIN_META_WORDS]
-            if len(non_meta) >= 1:
-                has_latin = True
-    return has_jp and has_latin
+def clean_up_internal_tags(metadata):
+    for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
+        if k in metadata:
+            del metadata[k]
 
 def process_track(tagger, metadata, track, release):
-    # Check if the loaded file on disk already had a dual Japanese/Latin title
+    mode = config.setting.get(TITLE_MODE_OPTION, "dual")
+
+    # 1. Comprobar si el archivo local ya traía un título bilingüe (Japonés + Romaji/Inglés)
     file_dual_title = None
     if track and hasattr(track, 'files'):
         for f in track.files:
@@ -88,11 +102,10 @@ def process_track(tagger, metadata, track, release):
     if file_dual_title:
         metadata['title'] = file_dual_title
         metadata['originaltitle'] = file_dual_title
-        for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
-            if k in metadata:
-                del metadata[k]
+        clean_up_internal_tags(metadata)
         return
 
+    # Preservar etiquetas originales
     if metadata.get('title') and 'originaltitle' not in metadata:
         metadata['originaltitle'] = metadata['title']
     if metadata.get('artist') and 'originalartist' not in metadata:
@@ -100,12 +113,26 @@ def process_track(tagger, metadata, track, release):
     if metadata.get('album') and 'originalalbum' not in metadata:
         metadata['originalalbum'] = metadata['album']
 
-    for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
-        if k in metadata:
-            del metadata[k]
+    clean_up_internal_tags(metadata)
 
+    # 2. Aplicar modo de formateo de títulos
+    orig_title = metadata.get('title', '')
+    if orig_title and contains_japanese(orig_title):
+        if mode == "japanese":
+            pass # Dejar en japonés original
+        elif mode == "dual":
+            converted_dict = romanize_dict({'title': orig_title})
+            romaji_title = converted_dict.get('title', orig_title)
+            if romaji_title and romaji_title != orig_title:
+                metadata['title'] = f"{orig_title} - {romaji_title}"
+        elif mode == "romaji":
+            converted_dict = romanize_dict({'title': orig_title})
+            if 'title' in converted_dict:
+                metadata['title'] = converted_dict['title']
+
+    # Convertir artistas y álbumes a Romaji
     to_convert = {}
-    for key in ['title', 'artist', 'album', 'albumartist']:
+    for key in ['artist', 'album', 'albumartist']:
         val = metadata.get(key)
         if val and contains_japanese(val):
             to_convert[key] = val
@@ -120,9 +147,7 @@ def process_album(tagger, metadata, release):
     if metadata.get('albumartist') and 'originalalbumartist' not in metadata:
         metadata['originalalbumartist'] = metadata['albumartist']
 
-    for k in ['_original_album', '_original_albumartist']:
-        if k in metadata:
-            del metadata[k]
+    clean_up_internal_tags(metadata)
 
     to_convert = {}
     for key in ['title', 'album', 'albumartist']:
@@ -134,5 +159,36 @@ def process_album(tagger, metadata, release):
         for k, v in converted.items():
             metadata[k] = v
 
+class AutoRomanizerOptionsPage(OptionsPage):
+    NAME = "auto_romanizer"
+    TITLE = "Auto Romanizer"
+    PARENT = "plugins"
+
+    def __init__(self, parent=None):
+        super(AutoRomanizerOptionsPage, self).__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        group = QtWidgets.QGroupBox("Formato de Títulos en Japonés", self)
+        group_layout = QtWidgets.QFormLayout(group)
+
+        self.combo_mode = QtWidgets.QComboBox(self)
+        self.combo_mode.addItem("Dual: Japonés - Romaji/Inglés (ej: プラネタリウム - Planetarium)", "dual")
+        self.combo_mode.addItem("Original: Conservar Japonés intacto (ej: プラネタリウム)", "japanese")
+        self.combo_mode.addItem("Solo Romaji: Convertir únicamente a Romaji (ej: Puranetariumu)", "romaji")
+
+        group_layout.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"), self.combo_mode)
+        layout.addWidget(group)
+        layout.addStretch()
+
+    def load(self):
+        mode = config.setting.get(TITLE_MODE_OPTION, "dual")
+        index = self.combo_mode.findData(mode)
+        if index >= 0:
+            self.combo_mode.setCurrentIndex(index)
+
+    def save(self):
+        config.setting[TITLE_MODE_OPTION] = self.combo_mode.currentData()
+
 register_track_metadata_processor(process_track)
 register_album_metadata_processor(process_album)
+register_options_page(AutoRomanizerOptionsPage)
