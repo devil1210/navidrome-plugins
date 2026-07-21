@@ -2,7 +2,7 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales (ORIGINALTITLE, ORIGINALARTIST, ORIGINALALBUM) para búsqueda de letras sincronizadas."
-PLUGIN_VERSION = "3.4"
+PLUGIN_VERSION = "3.5"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
