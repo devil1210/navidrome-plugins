@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.14"
+PLUGIN_VERSION = "3.15"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -42,34 +42,44 @@ def contains_japanese(text):
 def already_has_latin_translation(text):
     if not text or not contains_japanese(text):
         return False
-    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
+    # Split by standard separators
+    parts = re.split(r'\s*[\-\–\—\/]\s*', text)
     if len(parts) < 2:
         return False
-    has_jp = has_latin = False
+    has_jp = False
+    has_latin = False
     for p in parts:
         p = p.strip()
         if contains_japanese(p):
             has_jp = True
         else:
+            # Check if there are English/Romaji words (at least 2 letters) that are not meta words
             words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p)]
-            if any(w not in LATIN_META_WORDS for w in words):
+            if words and any(w not in LATIN_META_WORDS for w in words):
                 has_latin = True
     return has_jp and has_latin
 
 
 def _extract_base_jp(text):
-    """Return the core Japanese words before any version/qualifier suffixes.
+    """Return the core Japanese words before any version/qualifier suffixes or translations.
     'プラネタリウム - Planetarium' → 'プラネタリウム'
+    'プラネタリウム' → 'プラネタリウム'
     '帰りたくなったよ -acoustic version-' → '帰りたくなったよ'
+    '帰りたくなったよ -acoustic version- - Kaeritakunattayo' → '帰りたくなったよ'
     """
     if not text:
         return None
-    m = _JP_RE.search(text)
-    if not m:
-        return None
-    jp_onwards = text[m.start():]
-    base = re.split(r'\s+[\-\(]', jp_onwards)[0].strip()
-    return base if contains_japanese(base) else None
+    # Cut at the first separator if it splits Japanese from Latin/Romaji or extra info
+    parts = re.split(r'\s*[\-\–\—\/]\s*', text)
+    for p in parts:
+        p = p.strip()
+        if contains_japanese(p):
+            # Clean off any Latin qualifiers attached to the Japanese part like "-acoustic version-"
+            clean_jp = re.sub(r'[\-\(].*?[\-\)]', '', p).strip()
+            if contains_japanese(clean_jp):
+                return clean_jp
+            return p
+    return None
 
 def _find_dual_title_in_tagger(tagger, jp_title):
     """Search all files loaded in Picard for one whose title is a dual-language
@@ -79,9 +89,10 @@ def _find_dual_title_in_tagger(tagger, jp_title):
     files are loaded into Picard BEFORE the MusicBrainz lookup runs.
     """
     key = _extract_base_jp(jp_title) or jp_title
-    log.debug("Auto Romanizer: searching tagger.files for key=%r", key)
+    log.debug("Auto Romanizer: searching tagger.files for jp_title=%r (key=%r)", jp_title, key)
 
     all_files = getattr(tagger, 'files', {}) or {}
+    log.debug("Auto Romanizer: total files in tagger=%d", len(all_files))
     for filename, file_ in all_files.items():
         # 1. Check embedded metadata title (orig_metadata = original file tags)
         for attr in ('orig_metadata', 'metadata'):
@@ -89,13 +100,16 @@ def _find_dual_title_in_tagger(tagger, jp_title):
             if not meta:
                 continue
             title = meta.get('title', '')
+            if isinstance(title, list) and title:
+                title = title[0]
+            log.debug("Auto Romanizer: checking file=%r attr=%s title=%r", filename, attr, title)
             if title and already_has_latin_translation(title):
                 file_key = _extract_base_jp(title)
-                log.debug("Auto Romanizer: file=%r title=%r file_key=%r", filename, title, file_key)
-                if file_key == key:
-                    log.debug("Auto Romanizer: matched via metadata: %r", title)
+                log.debug("Auto Romanizer: candidate title=%r has_translation=True file_key=%r vs key=%r", title, file_key, key)
+                if file_key and key and (file_key == key or file_key in key or key in file_key):
+                    log.debug("Auto Romanizer: MATCHED via metadata: %r", title)
                     return title
-            break  # orig_metadata takes priority; don't check metadata if orig_metadata exists
+            break  # orig_metadata takes priority
 
         # 2. Fall back to filename
         basename = os.path.splitext(os.path.basename(filename))[0]
@@ -105,9 +119,11 @@ def _find_dual_title_in_tagger(tagger, jp_title):
             jp_onwards = clean[m.start():]
             if already_has_latin_translation(jp_onwards):
                 file_key = _extract_base_jp(jp_onwards)
-                if file_key == key:
-                    log.debug("Auto Romanizer: matched via filename: %r", jp_onwards)
+                log.debug("Auto Romanizer: candidate filename=%r file_key=%r vs key=%r", jp_onwards, file_key, key)
+                if file_key and key and (file_key == key or file_key in key or key in file_key):
+                    log.debug("Auto Romanizer: MATCHED via filename: %r", jp_onwards)
                     return jp_onwards
+    log.debug("Auto Romanizer: NO MATCH found for key=%r", key)
     return None
 
 
