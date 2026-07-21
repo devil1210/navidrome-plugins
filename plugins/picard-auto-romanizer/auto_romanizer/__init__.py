@@ -2,7 +2,7 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. Conserva títulos que ya tienen traducción al inglés/Romaji."
-PLUGIN_VERSION = "3.9"
+PLUGIN_VERSION = "3.10"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
@@ -115,10 +115,11 @@ def process_track(tagger, metadata, track, release):
                 metadata['title'] = file_dual
                 metadata['originaltitle'] = file_dual
             else:
-                # Sin traducción en el archivo: convertir a Romaji
+                # Sin traducción en el archivo: generar dual (Japonés - Romaji)
                 result = romanize_dict({'title': orig_title})
-                if 'title' in result:
-                    metadata['title'] = result['title']
+                romaji = result.get('title', orig_title)
+                if romaji and romaji != orig_title:
+                    metadata['title'] = "{} - {}".format(orig_title, romaji)
         elif mode == "japanese":
             pass  # Conservar japonés sin cambiar
         elif mode == "dual":
