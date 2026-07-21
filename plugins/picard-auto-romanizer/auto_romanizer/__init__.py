@@ -29,8 +29,17 @@ def romanize_dict(tags_dict):
         raw_json = json.dumps(tags_dict)
         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         proc = subprocess.Popen([PYTHON_PATH, SCRIPT_PATH, "--json-dict", raw_json], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creationflags)
-        out, _ = proc.communicate(timeout=5)
-        return json.loads(out.decode('utf-8', errors='ignore'))
+        out, err = proc.communicate(timeout=5)
+        if not out:
+            if err:
+                log.error("Auto Romanizer Process Error: %s", err.decode('utf-8', errors='ignore'))
+            return tags_dict
+        res = json.loads(out.decode('utf-8', errors='ignore'))
+        if isinstance(res, dict) and "error" not in res:
+            return res
+        elif isinstance(res, dict) and "error" in res:
+            log.error("Auto Romanizer Script Error: %s", res["error"])
+        return tags_dict
     except Exception as e:
         log.error("Auto Romanizer Error: %s", e)
         return tags_dict
