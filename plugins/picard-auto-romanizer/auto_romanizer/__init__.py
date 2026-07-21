@@ -12,7 +12,9 @@ import subprocess
 import json
 import os
 
-SCRIPT_PATH = r"E:\Descargas\SPbot\scripts\romanizer.py"
+LOCAL_SCRIPT = os.path.join(os.path.dirname(__file__), "romanizer.py")
+SPBOT_SCRIPT = r"E:\Descargas\SPbot\scripts\romanizer.py"
+SCRIPT_PATH = LOCAL_SCRIPT if os.path.exists(LOCAL_SCRIPT) else SPBOT_SCRIPT
 PYTHON_PATH = r"python"
 
 def contains_japanese(text):
