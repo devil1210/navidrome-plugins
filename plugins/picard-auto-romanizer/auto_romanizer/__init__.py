@@ -46,7 +46,53 @@ def romanize_dict(tags_dict):
         log.error("Auto Romanizer Error: %s", e)
         return tags_dict
 
+import re
+
+LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed', 'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'}
+
+def already_has_latin_translation(text):
+    if not text or not contains_japanese(text):
+        return False
+    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
+    if len(parts) < 2:
+        return False
+    has_jp = False
+    has_latin = False
+    for p in parts:
+        p_clean = p.strip()
+        if contains_japanese(p_clean):
+            has_jp = True
+        else:
+            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
+            non_meta = [w for w in words if w not in LATIN_META_WORDS]
+            if len(non_meta) >= 1:
+                has_latin = True
+    return has_jp and has_latin
+
 def process_track(tagger, metadata, track, release):
+    # Check if the loaded file on disk already had a dual Japanese/Latin title
+    file_dual_title = None
+    if track and hasattr(track, 'files'):
+        for f in track.files:
+            file_meta_title = f.metadata.get('title') if hasattr(f, 'metadata') else None
+            filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
+            clean_filename = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
+
+            if file_meta_title and already_has_latin_translation(file_meta_title):
+                file_dual_title = file_meta_title
+                break
+            elif clean_filename and already_has_latin_translation(clean_filename):
+                file_dual_title = clean_filename
+                break
+
+    if file_dual_title:
+        metadata['title'] = file_dual_title
+        metadata['originaltitle'] = file_dual_title
+        for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
+            if k in metadata:
+                del metadata[k]
+        return
+
     if metadata.get('title') and 'originaltitle' not in metadata:
         metadata['originaltitle'] = metadata['title']
     if metadata.get('artist') and 'originalartist' not in metadata:
