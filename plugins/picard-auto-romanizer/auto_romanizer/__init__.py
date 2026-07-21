@@ -47,15 +47,16 @@ def romanize_dict(tags_dict):
         return tags_dict
 
 def process_track(tagger, metadata, track, release):
-    if metadata.get('title'):
-        metadata['_original_title'] = metadata['title']
+    if metadata.get('title') and 'originaltitle' not in metadata:
         metadata['originaltitle'] = metadata['title']
-    if metadata.get('artist'):
-        metadata['_original_artist'] = metadata['artist']
+    if metadata.get('artist') and 'originalartist' not in metadata:
         metadata['originalartist'] = metadata['artist']
-    if metadata.get('album'):
-        metadata['_original_album'] = metadata['album']
+    if metadata.get('album') and 'originalalbum' not in metadata:
         metadata['originalalbum'] = metadata['album']
+
+    for k in ['_original_title', '_original_artist', '_original_album', '_original_albumartist']:
+        if k in metadata:
+            del metadata[k]
 
     to_convert = {}
     for key in ['title', 'artist', 'album', 'albumartist']:
@@ -68,12 +69,14 @@ def process_track(tagger, metadata, track, release):
             metadata[k] = v
 
 def process_album(tagger, metadata, release):
-    if metadata.get('title'):
-        metadata['_original_album'] = metadata['title']
+    if metadata.get('title') and 'originalalbum' not in metadata:
         metadata['originalalbum'] = metadata['title']
-    if metadata.get('albumartist'):
-        metadata['_original_albumartist'] = metadata['albumartist']
+    if metadata.get('albumartist') and 'originalalbumartist' not in metadata:
         metadata['originalalbumartist'] = metadata['albumartist']
+
+    for k in ['_original_album', '_original_albumartist']:
+        if k in metadata:
+            del metadata[k]
 
     to_convert = {}
     for key in ['title', 'album', 'albumartist']:
