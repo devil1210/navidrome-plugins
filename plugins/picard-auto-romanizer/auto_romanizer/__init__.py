@@ -9,15 +9,14 @@ PLUGIN_LICENSE = "GPL-2.0"
 from picard.metadata import register_track_metadata_processor, register_album_metadata_processor
 from picard.config import TextOption, config
 from picard.ui.options import OptionsPage, register_options_page
+from picard.ui.qt import QtWidgets
 from picard import log
-from PyQt5 import QtWidgets
 import subprocess
 import json
 import os
 import re
 
 TITLE_MODE_OPTION = "auto_romanizer_title_mode"
-config.register_option(TextOption("setting", TITLE_MODE_OPTION, "dual"))
 
 LOCAL_SCRIPT = os.path.join(os.path.dirname(__file__), "romanizer.py")
 SPBOT_SCRIPT = r"E:\Descargas\SPbot\scripts\romanizer.py"
@@ -163,6 +162,10 @@ class AutoRomanizerOptionsPage(OptionsPage):
     NAME = "auto_romanizer"
     TITLE = "Auto Romanizer"
     PARENT = "plugins"
+
+    options = [
+        config.TextOption("setting", TITLE_MODE_OPTION, "dual"),
+    ]
 
     def __init__(self, parent=None):
         super(AutoRomanizerOptionsPage, self).__init__(parent)
