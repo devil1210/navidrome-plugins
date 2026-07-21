@@ -55,12 +55,37 @@ def _convert_jp_segment(segment: str) -> str:
         rom = rom.capitalize()
     return rom.strip()
 
+LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed'}
+
+def already_has_latin_translation(text: str) -> bool:
+    if not contains_japanese(text):
+        return False
+    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
+    if len(parts) < 2:
+        return False
+    has_jp = False
+    has_latin = False
+    for p in parts:
+        p_clean = p.strip()
+        if contains_japanese(p_clean):
+            has_jp = True
+        else:
+            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
+            non_meta = [w for w in words if w not in LATIN_META_WORDS]
+            if len(non_meta) >= 1:
+                has_latin = True
+    return has_jp and has_latin
+
 def to_romaji(text: str) -> str:
     """
     Convierte SOLO los bloques japoneses de un texto a Romaji (Hepburn).
     El texto no japonés (inglés, números, símbolos, etc.) se preserva tal cual.
+    Si el texto ya posee un título/traducción en alfabeto latino (ej: 'Japonés - Romaji'), se deja intacto.
     """
     if not text:
+        return text
+
+    if already_has_latin_translation(text):
         return text
 
     non_jp_parts = _JP_SEG.split(text)
