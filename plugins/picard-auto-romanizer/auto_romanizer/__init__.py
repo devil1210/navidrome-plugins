@@ -6,11 +6,10 @@ PLUGIN_VERSION = "3.6"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
+from picard import config, log
 from picard.metadata import register_track_metadata_processor, register_album_metadata_processor
-from picard.config import TextOption, config
 from picard.ui.options import OptionsPage, register_options_page
 from picard.ui.qt import QtWidgets
-from picard import log
 import subprocess
 import json
 import os
