@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.13"
+PLUGIN_VERSION = "3.14"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -34,88 +34,44 @@ LATIN_META_WORDS = {
 }
 _JP_RE = re.compile(r'[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]')
 
-# ── Cache: base-japanese-title → full dual title from original file ──────────
-# Built when files are loaded into Picard, BEFORE the MusicBrainz lookup runs.
-_title_cache = {}   # e.g. {'プラネタリウム': 'プラネタリウム - Planetarium'}
+def _find_dual_title_in_tagger(tagger, jp_title):
+    """Search all files loaded in Picard for one whose title is a dual-language
+    version of the given Japanese title.
 
-
-def contains_japanese(text):
-    return bool(text and _JP_RE.search(text))
-
-
-def already_has_latin_translation(text):
-    if not text or not contains_japanese(text):
-        return False
-    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
-    if len(parts) < 2:
-        return False
-    has_jp = has_latin = False
-    for p in parts:
-        p = p.strip()
-        if contains_japanese(p):
-            has_jp = True
-        else:
-            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p)]
-            if any(w not in LATIN_META_WORDS for w in words):
-                has_latin = True
-    return has_jp and has_latin
-
-
-def _extract_base_jp(text):
-    """Return the core Japanese words before any version/qualifier suffixes.
-
-    'プラネタリウム - Planetarium'  → 'プラネタリウム'
-    '帰りたくなったよ -acoustic version-' → '帰りたくなったよ'
+    tagger.files is a dict {filename: File} that is always populated because
+    files are loaded into Picard BEFORE the MusicBrainz lookup runs.
     """
-    if not text:
-        return None
-    m = _JP_RE.search(text)
-    if not m:
-        return None
-    jp_onwards = text[m.start():]
-    # Cut at a whitespace-preceded '-' or '(' that starts a qualifier
-    base = re.split(r'\s+[\-\(]', jp_onwards)[0].strip()
-    return base if contains_japanese(base) else None
+    key = _extract_base_jp(jp_title) or jp_title
+    log.debug("Auto Romanizer: searching tagger.files for key=%r", key)
 
+    all_files = getattr(tagger, 'files', {}) or {}
+    for filename, file_ in all_files.items():
+        # 1. Check embedded metadata title (orig_metadata = original file tags)
+        for attr in ('orig_metadata', 'metadata'):
+            meta = getattr(file_, attr, None)
+            if not meta:
+                continue
+            title = meta.get('title', '')
+            if title and already_has_latin_translation(title):
+                file_key = _extract_base_jp(title)
+                log.debug("Auto Romanizer: file=%r title=%r file_key=%r", filename, title, file_key)
+                if file_key == key:
+                    log.debug("Auto Romanizer: matched via metadata: %r", title)
+                    return title
+            break  # orig_metadata takes priority; don't check metadata if orig_metadata exists
 
-def _cache_dual_title(dual_title):
-    """Add a confirmed dual-language title to the lookup cache."""
-    if not dual_title or not already_has_latin_translation(dual_title):
-        return
-    key = _extract_base_jp(dual_title)
-    if key and key not in _title_cache:
-        _title_cache[key] = dual_title
-        log.debug("Auto Romanizer cache: %r → %r", key, dual_title)
-
-
-def _cache_file(file_):
-    """Called when a file is loaded. Caches its original dual title if present."""
-    # 1. From the embedded metadata tag
-    for attr in ('orig_metadata', 'metadata'):
-        meta = getattr(file_, attr, None)
-        if meta:
-            _cache_dual_title(meta.get('title', ''))
-
-    # 2. From the filename itself (e.g. "01 - Artist - プラネタリウム - Planetarium.m4a")
-    if hasattr(file_, 'filename'):
-        basename = os.path.splitext(os.path.basename(file_.filename))[0]
-        # Strip leading track-number
+        # 2. Fall back to filename
+        basename = os.path.splitext(os.path.basename(filename))[0]
         clean = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-        # Find where Japanese starts and take from there
         m = _JP_RE.search(clean)
         if m:
             jp_onwards = clean[m.start():]
-            _cache_dual_title(jp_onwards)
-
-
-# Register the file post-load hook (Picard 2.6+).  Fail silently if unavailable.
-try:
-    from picard.plugin import register_file_post_load_processor
-    register_file_post_load_processor(_cache_file)
-    log.debug("Auto Romanizer: file_post_load_processor registered")
-except (ImportError, AttributeError):
-    log.debug("Auto Romanizer: register_file_post_load_processor not available – "
-              "auto mode will fall back to dual (Romaji) when no cache hit")
+            if already_has_latin_translation(jp_onwards):
+                file_key = _extract_base_jp(jp_onwards)
+                if file_key == key:
+                    log.debug("Auto Romanizer: matched via filename: %r", jp_onwards)
+                    return jp_onwards
+    return None
 
 
 # ── Romanization helper ───────────────────────────────────────────────────────
@@ -170,16 +126,15 @@ def process_track(tagger, metadata, track, release):
     orig_title = metadata.get('title', '')
     if orig_title and contains_japanese(orig_title):
         if mode == "auto":
-            # Look up cache by the base Japanese part of the MusicBrainz title.
-            # The cache was built when the files were loaded from disk.
-            key = _extract_base_jp(orig_title) or orig_title
-            cached_dual = _title_cache.get(key)
-            log.debug("Auto Romanizer auto-mode: key=%r cache_hit=%r", key, cached_dual)
-            if cached_dual:
-                metadata['title'] = cached_dual
-                metadata['originaltitle'] = cached_dual
+            # Search all files currently loaded in Picard for one whose
+            # original title is the dual-language version of this JP title.
+            # tagger.files is populated BEFORE the MusicBrainz lookup runs.
+            dual = _find_dual_title_in_tagger(tagger, orig_title)
+            if dual:
+                metadata['title'] = dual
+                metadata['originaltitle'] = dual
             else:
-                # No cached original – generate dual (Japonés - Romaji)
+                # No dual original found – generate dual (Japonés - Romaji)
                 result = romanize_dict({'title': orig_title})
                 romaji = result.get('title', orig_title)
                 if romaji and romaji != orig_title:
