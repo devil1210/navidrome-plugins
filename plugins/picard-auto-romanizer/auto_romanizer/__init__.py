@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.20"
+PLUGIN_VERSION = "3.21"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -119,6 +119,9 @@ def _find_dual_title_in_tagger(tagger, jp_title):
 # Maps extracted Japanese character key -> original file dual-language title
 _ORIGINAL_DUAL_CACHE = {}
 
+# Maps lowercased Latin title & track_number -> original file Latin title (casing preserved)
+_ORIGINAL_LATIN_CACHE = {}
+
 
 def _make_cache_key(text, track_num=None):
     """Generate a unique key incorporating Japanese characters and optional track number."""
@@ -161,6 +164,13 @@ def _on_file_loaded(file_):
             log.debug("Auto Romanizer cache: added title %r (key=%r, raw_key=%r)", title, key, raw_key)
             break
 
+        if title and not contains_japanese(title):
+            l_key = title.strip().lower()
+            _ORIGINAL_LATIN_CACHE[l_key] = title
+            if track_num:
+                _ORIGINAL_LATIN_CACHE["{}:{}".format(track_num, l_key)] = title
+            log.debug("Auto Romanizer cache: added Latin title %r", title)
+
     # Also check filename
     filename = getattr(file_, 'filename', '')
     if filename:
@@ -181,6 +191,14 @@ def _on_file_loaded(file_):
             if raw_key and raw_key not in _ORIGINAL_DUAL_CACHE:
                 _ORIGINAL_DUAL_CACHE[raw_key] = val
             log.debug("Auto Romanizer cache: added filename %r (key=%r, raw_key=%r)", val, key, raw_key)
+        elif not contains_japanese(basename):
+            clean_name = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
+            clean_name = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_name).strip()
+            l_key = clean_name.lower()
+            if l_key not in _ORIGINAL_LATIN_CACHE:
+                _ORIGINAL_LATIN_CACHE[l_key] = clean_name
+            if track_num:
+                _ORIGINAL_LATIN_CACHE["{}:{}".format(track_num, l_key)] = clean_name
 
 
 try:
@@ -312,7 +330,15 @@ def process_track(tagger, metadata, track, release):
     elif orig_title and not contains_japanese(orig_title):
         # Non-Japanese track (e.g., "Message" or "Happy Smile Again")
         if mode == "auto":
-            # If the linked file already has an original title in Latin (e.g. "Message"), preserve its original casing/formatting
+            track_num = metadata.get('tracknumber', '')
+            if isinstance(track_num, list) and track_num:
+                track_num = track_num[0]
+            track_num = str(track_num).split('/')[0].strip() if track_num else None
+            l_key = orig_title.strip().lower()
+
+            latin_title = None
+
+            # 0. Check linked files directly
             linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
             for f in linked_files:
                 for attr in ('orig_metadata', 'metadata'):
@@ -322,9 +348,49 @@ def process_track(tagger, metadata, track, release):
                     t = meta.get('title', '')
                     if isinstance(t, list) and t:
                         t = t[0]
-                    if t and t.lower().strip() == orig_title.lower().strip():
-                        metadata['title'] = t
+                    if t and t.lower().strip() == l_key:
+                        latin_title = t
                         break
+                if latin_title:
+                    break
+
+            # 1. Check _ORIGINAL_LATIN_CACHE by track number key
+            if not latin_title and track_num:
+                tn_key = "{}:{}".format(track_num, l_key)
+                if tn_key in _ORIGINAL_LATIN_CACHE:
+                    latin_title = _ORIGINAL_LATIN_CACHE[tn_key]
+                    log.debug("Auto Romanizer: MATCHED Latin title via track key: %r", latin_title)
+
+            # 2. Check _ORIGINAL_LATIN_CACHE by lowercased title
+            if not latin_title and l_key in _ORIGINAL_LATIN_CACHE:
+                latin_title = _ORIGINAL_LATIN_CACHE[l_key]
+                log.debug("Auto Romanizer: MATCHED Latin title via l_key: %r", latin_title)
+
+            # 3. Check tagger.files
+            if not latin_title:
+                all_files = getattr(tagger, 'files', {}) or {}
+                for filename, file_ in all_files.items():
+                    for attr in ('orig_metadata', 'metadata'):
+                        meta = getattr(file_, attr, None)
+                        if meta:
+                            t = meta.get('title', '')
+                            if isinstance(t, list) and t:
+                                t = t[0]
+                            if t and t.lower().strip() == l_key:
+                                latin_title = t
+                                break
+                    if not latin_title:
+                        basename = os.path.splitext(os.path.basename(filename))[0]
+                        clean_name = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
+                        clean_name = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_name).strip()
+                        if clean_name.lower() == l_key:
+                            latin_title = clean_name
+                            break
+                    if latin_title:
+                        break
+
+            if latin_title:
+                metadata['title'] = latin_title
 
     # Artist / album – always convert to Romaji regardless of mode
     to_convert = {}
