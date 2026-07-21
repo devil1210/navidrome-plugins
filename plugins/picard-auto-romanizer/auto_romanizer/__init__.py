@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.19"
+PLUGIN_VERSION = "3.20"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -120,10 +120,30 @@ def _find_dual_title_in_tagger(tagger, jp_title):
 _ORIGINAL_DUAL_CACHE = {}
 
 
+def _make_cache_key(text, track_num=None):
+    """Generate a unique key incorporating Japanese characters and optional track number."""
+    jp_key = _extract_base_jp(text)
+    if not jp_key:
+        return None
+    if track_num:
+        return "{}:{}".format(track_num, jp_key)
+    return jp_key
+
+
 def _on_file_loaded(file_):
     """Fired whenever a file is loaded in Picard.
     Reads original embedded metadata or filename and caches its dual-language title.
     """
+    track_num = None
+    for attr in ('orig_metadata', 'metadata'):
+        meta = getattr(file_, attr, None)
+        if meta and 'tracknumber' in meta:
+            tn = meta.get('tracknumber', '')
+            if isinstance(tn, list) and tn:
+                tn = tn[0]
+            track_num = str(tn).split('/')[0].strip()
+            break
+
     for attr in ('orig_metadata', 'metadata'):
         meta = getattr(file_, attr, None)
         if not meta:
@@ -132,24 +152,35 @@ def _on_file_loaded(file_):
         if isinstance(title, list) and title:
             title = title[0]
         if title and already_has_latin_translation(title):
-            key = _extract_base_jp(title)
-            if key and key not in _ORIGINAL_DUAL_CACHE:
+            key = _make_cache_key(title, track_num)
+            raw_key = _extract_base_jp(title)
+            if key:
                 _ORIGINAL_DUAL_CACHE[key] = title
-                log.debug("Auto Romanizer cache: added title %r (key=%r)", title, key)
+            if raw_key and raw_key not in _ORIGINAL_DUAL_CACHE:
+                _ORIGINAL_DUAL_CACHE[raw_key] = title
+            log.debug("Auto Romanizer cache: added title %r (key=%r, raw_key=%r)", title, key, raw_key)
             break
 
     # Also check filename
     filename = getattr(file_, 'filename', '')
     if filename:
         basename = os.path.splitext(os.path.basename(filename))[0]
+        # Attempt to parse leading track number from filename if not found in tags
+        if not track_num:
+            tn_match = re.match(r'^(\d+)', basename)
+            if tn_match:
+                track_num = tn_match.group(1).lstrip('0') or '0'
         if already_has_latin_translation(basename):
-            key = _extract_base_jp(basename)
-            if key and key not in _ORIGINAL_DUAL_CACHE:
-                clean_dual = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-                clean_dual = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_dual).strip() if contains_japanese(clean_dual) else clean_dual
-                val = clean_dual if already_has_latin_translation(clean_dual) else basename
+            key = _make_cache_key(basename, track_num)
+            raw_key = _extract_base_jp(basename)
+            clean_dual = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
+            clean_dual = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_dual).strip() if contains_japanese(clean_dual) else clean_dual
+            val = clean_dual if already_has_latin_translation(clean_dual) else basename
+            if key:
                 _ORIGINAL_DUAL_CACHE[key] = val
-                log.debug("Auto Romanizer cache: added filename %r (key=%r)", val, key)
+            if raw_key and raw_key not in _ORIGINAL_DUAL_CACHE:
+                _ORIGINAL_DUAL_CACHE[raw_key] = val
+            log.debug("Auto Romanizer cache: added filename %r (key=%r, raw_key=%r)", val, key, raw_key)
 
 
 try:
@@ -215,7 +246,12 @@ def process_track(tagger, metadata, track, release):
     if orig_title and contains_japanese(orig_title):
         if mode == "auto":
             dual = None
-            key = _extract_base_jp(orig_title)
+            raw_key = _extract_base_jp(orig_title)
+            track_num = metadata.get('tracknumber', '')
+            if isinstance(track_num, list) and track_num:
+                track_num = track_num[0]
+            track_num = str(track_num).split('/')[0].strip() if track_num else None
+            key = _make_cache_key(orig_title, track_num)
 
             # 0. Check linked files directly first (highest priority)
             linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
@@ -229,18 +265,23 @@ def process_track(tagger, metadata, track, release):
                         t = t[0]
                     if t and already_has_latin_translation(t):
                         fk = _extract_base_jp(t)
-                        if fk and key and (fk == key or fk in key or key in fk):
+                        if fk and raw_key and (fk == raw_key or fk in raw_key or raw_key in fk):
                             dual = t
                             break
                 if dual:
                     break
 
-            # 1. Check global file loading cache
+            # 1. Check track-number specific cache (e.g. "14:帰りたくなったよ")
             if not dual and key and key in _ORIGINAL_DUAL_CACHE:
                 dual = _ORIGINAL_DUAL_CACHE[key]
-                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE: %r for key=%r", dual, key)
+                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE track key: %r for key=%r", dual, key)
 
-            # 2. Search unlinked files in tagger.files
+            # 2. Check raw Japanese cache
+            if not dual and raw_key and raw_key in _ORIGINAL_DUAL_CACHE:
+                dual = _ORIGINAL_DUAL_CACHE[raw_key]
+                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE raw key: %r for raw_key=%r", dual, raw_key)
+
+            # 3. Search unlinked files in tagger.files
             if not dual:
                 dual = _find_dual_title_in_tagger(tagger, orig_title)
 
