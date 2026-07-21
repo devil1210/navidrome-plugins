@@ -2,7 +2,7 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. Conserva títulos que ya tienen traducción al inglés/Romaji."
-PLUGIN_VERSION = "3.8"
+PLUGIN_VERSION = "3.9"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
@@ -21,6 +21,7 @@ SCRIPT_PATH = LOCAL_SCRIPT if os.path.exists(LOCAL_SCRIPT) else SPBOT_SCRIPT
 PYTHON_PATH = r"python"
 
 TITLE_MODE_OPTION = "auto_romanizer_title_mode"
+DEFAULT_MODE = "auto"
 LATIN_META_WORDS = {'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed', 'remix', 'mix', 'instrumental', 'off', 'vocal', 'acoustic'}
 _JP_RE = re.compile(r'[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]')
 
@@ -77,28 +78,23 @@ def _clean_internal_tags(metadata):
             del metadata[k]
 
 
+def _get_file_dual_title(track):
+    """Returns the existing dual-language title from the file on disk, or None."""
+    if not (track and hasattr(track, 'files')):
+        return None
+    for f in track.files:
+        file_title = f.metadata.get('title') if hasattr(f, 'metadata') else None
+        filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
+        clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
+        if file_title and already_has_latin_translation(file_title):
+            return file_title
+        if clean_name and already_has_latin_translation(clean_name):
+            return clean_name
+    return None
+
+
 def process_track(tagger, metadata, track, release):
-    mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else "romaji"
-
-    # Conservar título bilingüe si el archivo original ya lo tenía
-    file_dual_title = None
-    if track and hasattr(track, 'files'):
-        for f in track.files:
-            file_title = f.metadata.get('title') if hasattr(f, 'metadata') else None
-            filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
-            clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
-            if file_title and already_has_latin_translation(file_title):
-                file_dual_title = file_title
-                break
-            elif clean_name and already_has_latin_translation(clean_name):
-                file_dual_title = clean_name
-                break
-
-    if file_dual_title:
-        metadata['title'] = file_dual_title
-        metadata['originaltitle'] = file_dual_title
-        _clean_internal_tags(metadata)
-        return
+    mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
 
     # Guardar originales
     if metadata.get('title') and 'originaltitle' not in metadata:
@@ -112,14 +108,25 @@ def process_track(tagger, metadata, track, release):
     # Aplicar modo de conversión al título
     orig_title = metadata.get('title', '')
     if orig_title and contains_japanese(orig_title):
-        if mode == "japanese":
+        if mode == "auto":
+            # Usar el tag original del archivo si ya tiene traducción (ej: プラネタリウム - Planetarium)
+            file_dual = _get_file_dual_title(track)
+            if file_dual:
+                metadata['title'] = file_dual
+                metadata['originaltitle'] = file_dual
+            else:
+                # Sin traducción en el archivo: convertir a Romaji
+                result = romanize_dict({'title': orig_title})
+                if 'title' in result:
+                    metadata['title'] = result['title']
+        elif mode == "japanese":
             pass  # Conservar japonés sin cambiar
         elif mode == "dual":
             result = romanize_dict({'title': orig_title})
             romaji = result.get('title', orig_title)
             if romaji and romaji != orig_title:
                 metadata['title'] = "{} - {}".format(orig_title, romaji)
-        else:  # romaji (default)
+        else:  # romaji
             result = romanize_dict({'title': orig_title})
             if 'title' in result:
                 metadata['title'] = result['title']
@@ -160,7 +167,7 @@ class AutoRomanizerOptionsPage(OptionsPage):
     PARENT = "plugins"
 
     options = [
-        config.TextOption("setting", TITLE_MODE_OPTION, "romaji"),
+        config.TextOption("setting", TITLE_MODE_OPTION, DEFAULT_MODE),
     ]
 
     def __init__(self, parent=None):
@@ -169,8 +176,9 @@ class AutoRomanizerOptionsPage(OptionsPage):
         from PyQt5 import QtWidgets
 
         self.combo_mode = QtWidgets.QComboBox(self)
-        self.combo_mode.addItem("Solo Romaji: reemplazar por Romaji (ej: Puranetariumu)", "romaji")
-        self.combo_mode.addItem("Dual: Japonés + Romaji (ej: プラネタリウム - Puranetariumu)", "dual")
+        self.combo_mode.addItem("Automático: conservar tag original si ya tiene traducción (ej: プラネタリウム - Planetarium)", "auto")
+        self.combo_mode.addItem("Solo Romaji: convertir a Romaji (ej: Puranetariumu)", "romaji")
+        self.combo_mode.addItem("Dual: Japonés + Romaji generado (ej: プラネタリウム - Puranetariumu)", "dual")
         self.combo_mode.addItem("Original: conservar Japonés sin cambiar (ej: プラネタリウム)", "japanese")
 
         form = QtWidgets.QFormLayout()
@@ -184,7 +192,7 @@ class AutoRomanizerOptionsPage(OptionsPage):
         vbox.addStretch()
 
     def load(self):
-        mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else "romaji"
+        mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
         idx = self.combo_mode.findData(mode)
         if idx >= 0:
             self.combo_mode.setCurrentIndex(idx)
