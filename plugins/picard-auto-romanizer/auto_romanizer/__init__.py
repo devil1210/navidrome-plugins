@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.21"
+PLUGIN_VERSION = "3.22"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -60,6 +60,14 @@ def already_has_latin_translation(text):
     return has_jp and has_latin
 
 
+def _strip_track_num_prefix(text):
+    """Strip leading track number prefix like '01 - ', '02 - ', '01. ', '01_' if present."""
+    if not text:
+        return text
+    cleaned = re.sub(r'^\d{1,3}[\s\.\-_]+\s*', '', text).strip()
+    return cleaned if cleaned else text
+
+
 def _extract_base_jp(text):
     """Extract all Japanese characters from text, removing spaces and symbols to form a pure matching key.
     'プラネタリウム - Planetarium' → 'プラネタリウム'
@@ -96,8 +104,9 @@ def _find_dual_title_in_tagger(tagger, jp_title):
                 file_key = _extract_base_jp(title)
                 log.debug("Auto Romanizer: candidate attr=%s title=%r file_key=%r vs key=%r", attr, title, file_key, key)
                 if file_key and key and (file_key == key or file_key in key or key in file_key):
-                    log.debug("Auto Romanizer: MATCHED via metadata: %r", title)
-                    return title
+                    clean_t = _strip_track_num_prefix(title)
+                    log.debug("Auto Romanizer: MATCHED via metadata: %r (clean=%r)", title, clean_t)
+                    return clean_t
             break  # orig_metadata takes priority
 
         # 2. Fall back to filename
@@ -106,10 +115,8 @@ def _find_dual_title_in_tagger(tagger, jp_title):
             file_key = _extract_base_jp(basename)
             log.debug("Auto Romanizer: candidate filename=%r file_key=%r vs key=%r", basename, file_key, key)
             if file_key and key and (file_key == key or file_key in key or key in file_key):
-                log.debug("Auto Romanizer: MATCHED via filename: %r", basename)
-                # Clean track number / artist prefix if present to return pure dual title
-                clean_dual = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-                clean_dual = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_dual).strip() if contains_japanese(clean_dual) else clean_dual
+                clean_dual = _strip_track_num_prefix(basename)
+                log.debug("Auto Romanizer: MATCHED via filename: %r (clean=%r)", basename, clean_dual)
                 return clean_dual if already_has_latin_translation(clean_dual) else basename
     log.debug("Auto Romanizer: NO MATCH found for key=%r", key)
     return None
@@ -155,21 +162,23 @@ def _on_file_loaded(file_):
         if isinstance(title, list) and title:
             title = title[0]
         if title and already_has_latin_translation(title):
-            key = _make_cache_key(title, track_num)
-            raw_key = _extract_base_jp(title)
+            clean_title = _strip_track_num_prefix(title)
+            key = _make_cache_key(clean_title, track_num)
+            raw_key = _extract_base_jp(clean_title)
             if key:
-                _ORIGINAL_DUAL_CACHE[key] = title
+                _ORIGINAL_DUAL_CACHE[key] = clean_title
             if raw_key and raw_key not in _ORIGINAL_DUAL_CACHE:
-                _ORIGINAL_DUAL_CACHE[raw_key] = title
-            log.debug("Auto Romanizer cache: added title %r (key=%r, raw_key=%r)", title, key, raw_key)
+                _ORIGINAL_DUAL_CACHE[raw_key] = clean_title
+            log.debug("Auto Romanizer cache: added title %r (key=%r, raw_key=%r)", clean_title, key, raw_key)
             break
 
         if title and not contains_japanese(title):
-            l_key = title.strip().lower()
-            _ORIGINAL_LATIN_CACHE[l_key] = title
+            clean_l = _strip_track_num_prefix(title)
+            l_key = clean_l.strip().lower()
+            _ORIGINAL_LATIN_CACHE[l_key] = clean_l
             if track_num:
-                _ORIGINAL_LATIN_CACHE["{}:{}".format(track_num, l_key)] = title
-            log.debug("Auto Romanizer cache: added Latin title %r", title)
+                _ORIGINAL_LATIN_CACHE["{}:{}".format(track_num, l_key)] = clean_l
+            log.debug("Auto Romanizer cache: added Latin title %r", clean_l)
 
     # Also check filename
     filename = getattr(file_, 'filename', '')
@@ -181,10 +190,9 @@ def _on_file_loaded(file_):
             if tn_match:
                 track_num = tn_match.group(1).lstrip('0') or '0'
         if already_has_latin_translation(basename):
-            key = _make_cache_key(basename, track_num)
-            raw_key = _extract_base_jp(basename)
-            clean_dual = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-            clean_dual = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_dual).strip() if contains_japanese(clean_dual) else clean_dual
+            clean_dual = _strip_track_num_prefix(basename)
+            key = _make_cache_key(clean_dual, track_num)
+            raw_key = _extract_base_jp(clean_dual)
             val = clean_dual if already_has_latin_translation(clean_dual) else basename
             if key:
                 _ORIGINAL_DUAL_CACHE[key] = val
@@ -192,8 +200,7 @@ def _on_file_loaded(file_):
                 _ORIGINAL_DUAL_CACHE[raw_key] = val
             log.debug("Auto Romanizer cache: added filename %r (key=%r, raw_key=%r)", val, key, raw_key)
         elif not contains_japanese(basename):
-            clean_name = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-            clean_name = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_name).strip()
+            clean_name = _strip_track_num_prefix(basename)
             l_key = clean_name.lower()
             if l_key not in _ORIGINAL_LATIN_CACHE:
                 _ORIGINAL_LATIN_CACHE[l_key] = clean_name
@@ -284,7 +291,7 @@ def process_track(tagger, metadata, track, release):
                     if t and already_has_latin_translation(t):
                         fk = _extract_base_jp(t)
                         if fk and raw_key and (fk == raw_key or fk in raw_key or raw_key in fk):
-                            dual = t
+                            dual = _strip_track_num_prefix(t)
                             break
                 if dual:
                     break
@@ -304,8 +311,9 @@ def process_track(tagger, metadata, track, release):
                 dual = _find_dual_title_in_tagger(tagger, orig_title)
 
             if dual:
-                metadata['title'] = dual
-                metadata['originaltitle'] = dual
+                clean_dual = _strip_track_num_prefix(dual)
+                metadata['title'] = clean_dual
+                metadata['originaltitle'] = clean_dual
             else:
                 # No dual original found – generate dual (Japonés - Romaji)
                 result = romanize_dict({'title': orig_title})
@@ -390,7 +398,7 @@ def process_track(tagger, metadata, track, release):
                         break
 
             if latin_title:
-                metadata['title'] = latin_title
+                metadata['title'] = _strip_track_num_prefix(latin_title)
 
     # Artist / album – always convert to Romaji regardless of mode
     to_convert = {}
