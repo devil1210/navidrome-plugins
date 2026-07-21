@@ -6,7 +6,7 @@ PLUGIN_DESCRIPTION = (
     "preservando metadatos originales. En modo Automático conserva títulos que "
     "ya tienen traducción al inglés/Romaji desde el archivo original."
 )
-PLUGIN_VERSION = "3.17"
+PLUGIN_VERSION = "3.18"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
                        "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
@@ -115,7 +115,54 @@ def _find_dual_title_in_tagger(tagger, jp_title):
     return None
 
 
-# ── Romanization helper ───────────────────────────────────────────────────────
+# ── File loading cache ────────────────────────────────────────────────────────
+# Maps extracted Japanese character key -> original file dual-language title
+_ORIGINAL_DUAL_CACHE = {}
+
+
+def _on_file_loaded(file_):
+    """Fired whenever a file is loaded in Picard.
+    Reads original embedded metadata or filename and caches its dual-language title.
+    """
+    for attr in ('orig_metadata', 'metadata'):
+        meta = getattr(file_, attr, None)
+        if not meta:
+            continue
+        title = meta.get('title', '')
+        if isinstance(title, list) and title:
+            title = title[0]
+        if title and already_has_latin_translation(title):
+            key = _extract_base_jp(title)
+            if key and key not in _ORIGINAL_DUAL_CACHE:
+                _ORIGINAL_DUAL_CACHE[key] = title
+                log.debug("Auto Romanizer cache: added title %r (key=%r)", title, key)
+            break
+
+    # Also check filename
+    filename = getattr(file_, 'filename', '')
+    if filename:
+        basename = os.path.splitext(os.path.basename(filename))[0]
+        if already_has_latin_translation(basename):
+            key = _extract_base_jp(basename)
+            if key and key not in _ORIGINAL_DUAL_CACHE:
+                clean_dual = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
+                clean_dual = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_dual).strip() if contains_japanese(clean_dual) else clean_dual
+                val = clean_dual if already_has_latin_translation(clean_dual) else basename
+                _ORIGINAL_DUAL_CACHE[key] = val
+                log.debug("Auto Romanizer cache: added filename %r (key=%r)", val, key)
+
+
+try:
+    from picard.file import register_file_post_load_processor
+    register_file_post_load_processor(_on_file_loaded)
+    log.debug("Auto Romanizer: file_post_load_processor registered successfully")
+except (ImportError, AttributeError):
+    try:
+        from picard.plugin import register_file_post_load_processor
+        register_file_post_load_processor(_on_file_loaded)
+        log.debug("Auto Romanizer: file_post_load_processor registered via picard.plugin")
+    except (ImportError, AttributeError):
+        log.debug("Auto Romanizer: register_file_post_load_processor unavailable")
 
 def romanize_dict(tags_dict):
     if not os.path.exists(SCRIPT_PATH):
@@ -167,27 +214,34 @@ def process_track(tagger, metadata, track, release):
     orig_title = metadata.get('title', '')
     if orig_title and contains_japanese(orig_title):
         if mode == "auto":
-            # 1. First check if a file is already linked to this track and has a dual title
             dual = None
-            linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
-            for f in linked_files:
-                for attr in ('orig_metadata', 'metadata'):
-                    meta = getattr(f, attr, None)
-                    if not meta:
-                        continue
-                    t = meta.get('title', '')
-                    if isinstance(t, list) and t:
-                        t = t[0]
-                    if t and already_has_latin_translation(t):
-                        fk = _extract_base_jp(t)
-                        key = _extract_base_jp(orig_title)
-                        if fk and key and (fk == key or fk in key or key in fk):
-                            dual = t
-                            break
-                if dual:
-                    break
+            key = _extract_base_jp(orig_title)
 
-            # 2. If no linked file match, search unlinked files in tagger.files
+            # 0. Check global file loading cache first (populated whenever files are loaded into Picard)
+            if key and key in _ORIGINAL_DUAL_CACHE:
+                dual = _ORIGINAL_DUAL_CACHE[key]
+                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE: %r for key=%r", dual, key)
+
+            # 1. Check if a file is already linked to this track and has a dual title
+            if not dual:
+                linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
+                for f in linked_files:
+                    for attr in ('orig_metadata', 'metadata'):
+                        meta = getattr(f, attr, None)
+                        if not meta:
+                            continue
+                        t = meta.get('title', '')
+                        if isinstance(t, list) and t:
+                            t = t[0]
+                        if t and already_has_latin_translation(t):
+                            fk = _extract_base_jp(t)
+                            if fk and key and (fk == key or fk in key or key in fk):
+                                dual = t
+                                break
+                    if dual:
+                        break
+
+            # 2. Search unlinked files in tagger.files
             if not dual:
                 dual = _find_dual_title_in_tagger(tagger, orig_title)
 
