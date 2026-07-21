@@ -34,6 +34,43 @@ LATIN_META_WORDS = {
 }
 _JP_RE = re.compile(r'[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]')
 
+
+def contains_japanese(text):
+    return bool(text and _JP_RE.search(text))
+
+
+def already_has_latin_translation(text):
+    if not text or not contains_japanese(text):
+        return False
+    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', text)
+    if len(parts) < 2:
+        return False
+    has_jp = has_latin = False
+    for p in parts:
+        p = p.strip()
+        if contains_japanese(p):
+            has_jp = True
+        else:
+            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p)]
+            if any(w not in LATIN_META_WORDS for w in words):
+                has_latin = True
+    return has_jp and has_latin
+
+
+def _extract_base_jp(text):
+    """Return the core Japanese words before any version/qualifier suffixes.
+    'プラネタリウム - Planetarium' → 'プラネタリウム'
+    '帰りたくなったよ -acoustic version-' → '帰りたくなったよ'
+    """
+    if not text:
+        return None
+    m = _JP_RE.search(text)
+    if not m:
+        return None
+    jp_onwards = text[m.start():]
+    base = re.split(r'\s+[\-\(]', jp_onwards)[0].strip()
+    return base if contains_japanese(base) else None
+
 def _find_dual_title_in_tagger(tagger, jp_title):
     """Search all files loaded in Picard for one whose title is a dual-language
     version of the given Japanese title.
