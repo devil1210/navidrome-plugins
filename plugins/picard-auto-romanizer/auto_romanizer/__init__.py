@@ -81,7 +81,7 @@ def clean_up_internal_tags(metadata):
             del metadata[k]
 
 def process_track(tagger, metadata, track, release):
-    mode = config.setting.get(TITLE_MODE_OPTION, "dual")
+    mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else "dual"
 
     # 1. Comprobar si el archivo local ya traía un título bilingüe (Japonés + Romaji/Inglés)
     file_dual_title = None
@@ -168,23 +168,24 @@ class AutoRomanizerOptionsPage(OptionsPage):
     ]
 
     def __init__(self, parent=None):
-        super(AutoRomanizerOptionsPage, self).__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-
-        group = QtWidgets.QGroupBox("Formato de Títulos en Japonés", self)
-        group_layout = QtWidgets.QFormLayout(group)
-
+        super().__init__(parent)
         self.combo_mode = QtWidgets.QComboBox(self)
         self.combo_mode.addItem("Dual: Japonés - Romaji/Inglés (ej: プラネタリウム - Planetarium)", "dual")
         self.combo_mode.addItem("Original: Conservar Japonés intacto (ej: プラネタリウム)", "japanese")
         self.combo_mode.addItem("Solo Romaji: Convertir únicamente a Romaji (ej: Puranetariumu)", "romaji")
 
-        group_layout.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"), self.combo_mode)
-        layout.addWidget(group)
-        layout.addStretch()
+        form = QtWidgets.QFormLayout()
+        form.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"), self.combo_mode)
+
+        group = QtWidgets.QGroupBox("Formato de Títulos en Japonés", self)
+        group.setLayout(form)
+
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.addWidget(group)
+        vbox.addStretch()
 
     def load(self):
-        mode = config.setting.get(TITLE_MODE_OPTION, "dual")
+        mode = config.setting[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in config.setting else "dual"
         index = self.combo_mode.findData(mode)
         if index >= 0:
             self.combo_mode.setCurrentIndex(index)
