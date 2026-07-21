@@ -2,7 +2,7 @@
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "SPbot"
 PLUGIN_DESCRIPTION = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. Conserva títulos que ya tienen traducción al inglés/Romaji."
-PLUGIN_VERSION = "3.11"
+PLUGIN_VERSION = "3.12"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
 PLUGIN_LICENSE = "GPL-2.0"
 
@@ -79,19 +79,28 @@ def _clean_internal_tags(metadata):
 
 
 def _get_file_dual_title(track):
-    """Returns the existing dual-language title from the file on disk, or None.
-    Uses track.linked_files which is the correct Picard API attribute.
+    """Reads the original file tags (orig_metadata) before MusicBrainz overwrites them.
+    Returns the dual-language title if found, otherwise None.
     """
-    files = getattr(track, 'linked_files', None) or getattr(track, 'files', None)
+    files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
+    log.debug("Auto Romanizer: _get_file_dual_title called, files=%s", files)
     if not files:
         return None
     for f in files:
-        file_title = f.metadata.get('title') if hasattr(f, 'metadata') else None
+        # orig_metadata = tags from disk before MusicBrainz processing
+        # metadata = already overwritten by MusicBrainz at this point
+        orig = getattr(f, 'orig_metadata', None) or getattr(f, 'metadata', None)
+        if orig is None:
+            continue
+        file_title = orig.get('title', '')
         filename_base = os.path.splitext(os.path.basename(f.filename))[0] if hasattr(f, 'filename') else ''
         clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename_base).strip()
+        log.debug("Auto Romanizer: checking file=%s title=%s filename=%s", f.filename, file_title, clean_name)
         if file_title and already_has_latin_translation(file_title):
+            log.debug("Auto Romanizer: found dual title in orig_metadata: %s", file_title)
             return file_title
         if clean_name and already_has_latin_translation(clean_name):
+            log.debug("Auto Romanizer: found dual title in filename: %s", clean_name)
             return clean_name
     return None
 
