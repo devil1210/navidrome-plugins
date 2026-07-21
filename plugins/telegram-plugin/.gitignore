@@ -1,0 +1,6 @@
+# Build artifacts
+*.wasm
+*.ndp
+plugin.wasm
+navidrome-telegram.ndp
+navidrome-ntfy-plugin.ndp

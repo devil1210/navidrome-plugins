@@ -1,0 +1,196 @@
+{
+  "name": "Telegram New Album Notifications",
+  "author": "Devil_1210",
+  "version": "1.5.1",
+  "description": "Polls Navidrome for newly added albums and sends notifications directly to Telegram, with optional Subsonic cover-art URLs.",
+  "website": "https://github.com/devil1210/navidrome-telegram-plugin",
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "telegram_bot_token": {
+          "type": "string",
+          "title": "Telegram Bot Token",
+          "description": "Bot token used to call Telegram Bot API directly."
+        },
+        "telegram_chat_id": {
+          "type": "string",
+          "title": "Telegram Chat ID",
+          "description": "Target chat ID or channel ID for Telegram notifications. Multiple IDs can be separated by commas."
+        },
+        "telegram_thread_id": {
+          "type": "string",
+          "title": "Telegram Thread ID (Topic)",
+          "description": "Optional Message Thread ID (Topic ID) for forum supergroups (e.g. 104674)."
+        },
+        "telegram_parse_mode": {
+          "type": "string",
+          "title": "Telegram Parse Mode",
+          "description": "Parse mode for Telegram caption/message. Recommended: HTML, Markdown, or MarkdownV2.",
+          "default": "HTML"
+        },
+        "subsonic_user": {
+          "type": "string",
+          "title": "Subsonic Username",
+          "description": "Navidrome username used to perform internal Subsonic API calls and optional cover-art URL generation."
+        },
+        "subsonic_password": {
+          "type": "string",
+          "title": "Subsonic Password",
+          "description": "Navidrome password used to generate token-authenticated getCoverArt URLs when Subsonic cover art is enabled."
+        },
+        "subsonic_base_url": {
+          "type": "string",
+          "title": "Subsonic Base URL",
+          "description": "Base URL used to build getCoverArt URLs, e.g. https://navidrome.example.com or http://192.168.1.120:4533"
+        },
+        "use_subsonic_cover_art": {
+          "type": "boolean",
+          "title": "Use Subsonic Cover Art",
+          "description": "If enabled and image_url_template is blank, generate attach URLs using /rest/getCoverArt.view for each album."
+        },
+        "subsonic_cover_size": {
+          "type": "string",
+          "title": "Subsonic Cover Size",
+          "description": "Image size passed to getCoverArt.view. Default: 600.",
+          "default": "600"
+        },
+        "subsonic_api_version": {
+          "type": "string",
+          "title": "Subsonic API Version",
+          "description": "Subsonic/OpenSubsonic API version for generated cover-art URLs.",
+          "default": "1.16.1"
+        },
+        "subsonic_client": {
+          "type": "string",
+          "title": "Subsonic Client Name",
+          "description": "Client name sent as the 'c' parameter in generated getCoverArt URLs.",
+          "default": "navidrome-telegram-plugin"
+        },
+        "poll_interval": {
+          "type": "string",
+          "title": "Poll Interval (cron)",
+          "description": "Cron expression controlling how often the plugin checks for new albums. Default: every minute (*/1 * * * *).",
+          "default": "*/1 * * * *"
+        },
+        "message_title": {
+          "type": "string",
+          "title": "Message Title Template",
+          "description": "Notification title. You can use {album}, {artist}, {id}, and {url} placeholders.",
+          "default": "<h2>📚 {album}</h2>\n<h4>👤 {artist}</h4>\n"
+        },
+        "message_body": {
+          "type": "string",
+          "title": "Message Body Template",
+          "description": "Notification body. Supports {album}, {artist}, {id}, {year}, {genre}, {discCount}, {songCount}, {duration}, {songs}, and {url} placeholders. Use plain text or markdown/HTML depending on parse mode.",
+          "default": "<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n {songs}\n</details>\n\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
+        },
+        "image_url_template": {
+          "type": "string",
+          "title": "Image URL Template",
+          "description": "Optional image URL to attach. If empty and Use Subsonic Cover Art is enabled, the plugin generates a getCoverArt URL automatically."
+        }
+      },
+      "required": [
+        "telegram_bot_token",
+        "telegram_chat_id",
+        "subsonic_user"
+      ]
+    },
+    "uiSchema": {
+      "type": "VerticalLayout",
+      "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/telegram_bot_token",
+          "options": {
+            "format": "password"
+          }
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/telegram_chat_id"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/telegram_thread_id"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/telegram_parse_mode"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_user"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_password",
+          "options": {
+            "format": "password"
+          }
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_base_url"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/use_subsonic_cover_art"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_cover_size"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_api_version"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/subsonic_client"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/poll_interval"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/message_title"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/message_body",
+          "options": {
+            "multi": true
+          }
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/image_url_template"
+        }
+      ]
+    }
+  },
+  "permissions": {
+    "http": {
+      "reason": "POST notifications to Telegram Bot API and download cover-art from Subsonic server",
+      "requiredHosts": [
+        "*"
+      ]
+    },
+    "scheduler": {
+      "reason": "Schedule a recurring poll for newly added albums"
+    },
+    "kvstore": {
+      "reason": "Persist the last-seen album ID across server restarts",
+      "maxSize": "4KB"
+    },
+    "subsonicapi": {
+      "reason": "Query the Navidrome library for recently added albums"
+    },
+    "users": {
+      "reason": "Required by the subsonicapi permission to authorise internal API calls"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# Compiled WASM binaries & NDP packages
+*.wasm
+*.ndp
+*.zip
+
+# OS & IDE junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
