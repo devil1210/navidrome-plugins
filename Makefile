@@ -1,4 +1,4 @@
-.PHONY: all build-telegram build-lyrics build-all package package-telegram package-lyrics package-picard package-deduplicator deploy clean
+.PHONY: all build-telegram build-lyrics build-all package package-telegram package-lyrics package-picard package-deduplicator deploy-telegram deploy-lyrics deploy clean
 
 WASM_OUT := plugin.wasm
 TELEGRAM_DIR := plugins/telegram-plugin
@@ -7,9 +7,14 @@ PICARD_DIR := plugins/picard-auto-romanizer
 DEDUP_DIR := plugins/picard-deduplicator
 
 TELEGRAM_NDP := navidrome-telegram.ndp
-LYRICS_NDP := navidrome-lyrics-plugin.ndp
+LYRICS_NDP := nd-lyrics.ndp
 PICARD_ZIP := auto_romanizer.zip
 DEDUP_ZIP := picard_deduplicator.zip
+
+-include .env
+
+DEST ?= $(NAV_DEST)
+DEST ?= user@your-server:/path/to/plugins
 
 all: package
 
@@ -42,7 +47,15 @@ package-deduplicator:
 package: package-telegram package-lyrics package-picard package-deduplicator
 	@echo "Successfully packaged all plugins."
 
-deploy:
+deploy-telegram: package-telegram
+	@echo "==> Deploying telegram-plugin to $(DEST)..."
+	powershell -Command "scp plugins/telegram-plugin/$(TELEGRAM_NDP) '$(DEST)/$(TELEGRAM_NDP)'"
+
+deploy-lyrics: package-lyrics
+	@echo "==> Deploying lyrics-plugin to $(DEST)..."
+	powershell -Command "scp plugins/lyrics-plugin/$(LYRICS_NDP) '$(DEST)/$(LYRICS_NDP)'"
+
+deploy: package
 	@bash scripts/deploy.sh $(DEST)
 
 clean:

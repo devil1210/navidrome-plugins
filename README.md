@@ -86,11 +86,27 @@ make package-picard
 
 ### Despliegue Automático
 
-Envía los paquetes `.ndp` generados al servidor destino vía `scp`:
+Las rutas y datos del servidor de despliegue se configuran de forma privada en el archivo local `.env` (ignorado por Git):
 
 ```bash
-make deploy DEST=usuario@servidor-lxc:/var/lib/navidrome/plugins
+# Crear tu archivo .env local basado en .env.example
+NAV_DEST="usuario@tu-servidor-lxc:/ruta/a/navidrome/plugins"
 ```
+
+- **Compilar, empaquetar y desplegar solo Telegram plugin**:
+  ```bash
+  make deploy-telegram
+  ```
+
+- **Compilar, empaquetar y desplegar solo Lyrics plugin**:
+  ```bash
+  make deploy-lyrics
+  ```
+
+- **Compilar, empaquetar y desplegar todos los plugins**:
+  ```bash
+  make deploy
+  ```
 
 ---
 

@@ -42,8 +42,8 @@ const (
 )
 
 const (
-	defaultTitleTemplate  = "<h3>📚 {album}</h3>"
-	defaultBodyTemplate   = "<h4>👤 {artist}</h4>\n\n<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n  <blockquote>\n    {songs}\n  </blockquote>\n</details>\n\n<hr/>\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
+	defaultTitleTemplate  = "<h3>📚 {album}</h3>\n<h4>👤 {artist}</h4>"
+	defaultBodyTemplate   = "<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n  <blockquote>\n    {songs}\n  </blockquote>\n</details>\n\n<hr/>\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
 	defaultSubsonicClient = "navidrome-telegram-plugin"
 	defaultSubsonicAPI    = "1.16.1"
 	defaultCoverSize      = "600"
@@ -104,8 +104,9 @@ type richMessage struct {
 type telegramPlugin struct{}
 
 func init() {
-	lifecycle.Register(&telegramPlugin{})
-	scheduler.Register(&telegramPlugin{})
+	p := &telegramPlugin{}
+	lifecycle.Register(p)
+	scheduler.Register(p)
 }
 
 var (
@@ -118,19 +119,21 @@ func (p *telegramPlugin) OnInit() error {
 
 	cronExpr := defaultCronExpr
 	if v, ok := pdk.GetConfig(cfgPollInterval); ok && strings.TrimSpace(v) != "" {
-		cronExpr = v
+		cronExpr = strings.TrimSpace(v)
 	}
 
-	_, err := host.SchedulerScheduleRecurring(cronExpr, "poll", pollScheduleID)
+	res, err := host.SchedulerScheduleRecurring(cronExpr, "poll", pollScheduleID)
 	if err != nil {
+		pdk.Log(pdk.LogError, fmt.Sprintf("failed to schedule album poll: %v", err))
 		return fmt.Errorf("failed to schedule album poll: %w", err)
 	}
 
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("album poll scheduled with cron: %s", cronExpr))
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("album poll scheduled successfully ID=%s with cron: %s", res, cronExpr))
 	return nil
 }
 
 func (p *telegramPlugin) OnCallback(input scheduler.SchedulerCallbackRequest) error {
+	pdk.Log(pdk.LogDebug, fmt.Sprintf("scheduler callback fired: scheduleId=%s", input.ScheduleID))
 	if input.ScheduleID != pollScheduleID {
 		return nil
 	}
@@ -666,52 +669,38 @@ func applyTemplate(input string, album subsonicAlbum, songs []subsonicSong) stri
 }
 
 func cleanHTMLTemplate(input string) string {
-	// First convert literal \n (two chars: backslash + n) to real newlines
+	// 1. Unescape literal \n and quotes
 	input = strings.ReplaceAll(input, "\\n", "\n")
-	// Fix backslash-escaped quotes
 	input = strings.ReplaceAll(input, "\\\"", "\"")
 
-	// Now process newlines intelligently:
-	// - Newlines between HTML tags (>...whitespace...<) = just formatting, strip them
-	// - Newlines adjacent to text content = real line breaks, convert to <br/>
-	runes := []rune(input)
-	n := len(runes)
+	// 2. Process newlines: convert single newlines between block elements or tags to space/nothing
+	// We handle:
+	// - Newline between '>' and '<': drop entirely
+	// - Newline after '</h4>', '</h3>', '</h2>', '</h1>', '</div>', '</p>', '</table>': drop entirely
+	// - Newline before '<table>', '<div>', '<p>', '<h2>', '<h3>', '<h4>': drop entirely
+	// - Newline within normal text: convert to <br/>
+
+	lines := strings.Split(input, "\n")
+	var cleanedLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			cleanedLines = append(cleanedLines, trimmed)
+		}
+	}
+
+	// Join with nothing if adjacent to HTML tags, otherwise join
 	var result strings.Builder
-
-	for i := 0; i < n; i++ {
-		if runes[i] != '\n' {
-			result.WriteRune(runes[i])
-			continue
-		}
-
-		// Found a newline - look back for previous non-whitespace char
-		prevNonWS := rune(' ')
-		for j := i - 1; j >= 0; j-- {
-			if runes[j] != ' ' && runes[j] != '\t' && runes[j] != '\n' {
-				prevNonWS = runes[j]
-				break
-			}
-		}
-		// Look forward for next non-whitespace char
-		nextNonWS := rune(' ')
-		for j := i + 1; j < n; j++ {
-			if runes[j] != ' ' && runes[j] != '\t' && runes[j] != '\n' {
-				nextNonWS = runes[j]
-				break
-			}
-		}
-
-		if prevNonWS == '>' && nextNonWS == '<' {
-			// Newline between HTML tags — just indentation, strip it
-			for i+1 < n && (runes[i+1] == '\n' || runes[i+1] == ' ' || runes[i+1] == '\t') {
-				i++
-			}
-		} else {
-			// Newline adjacent to text content — convert to <br/>
-			result.WriteString("<br/>")
-			// Collapse consecutive newlines
-			for i+1 < n && runes[i+1] == '\n' {
-				i++
+	for i, l := range cleanedLines {
+		result.WriteString(l)
+		if i < len(cleanedLines)-1 {
+			next := cleanedLines[i+1]
+			// If current line ends with a tag or next line starts with a tag, don't add <br/>
+			if strings.HasSuffix(l, ">") || strings.HasPrefix(next, "<") {
+				// No break tag needed between HTML elements
+			} else {
+				result.WriteString("<br/>")
 			}
 		}
 	}

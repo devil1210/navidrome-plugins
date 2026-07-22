@@ -36,6 +36,24 @@ func (p *LRCLIBProvider) Name() string {
 	return "lrclib"
 }
 
+// CleanLyricsText removes ^translation annotations common in LRCLIB synced lyrics.
+func CleanLyricsText(raw string) string {
+	if !strings.Contains(raw, "^") {
+		return raw
+	}
+	lines := strings.Split(raw, "\n")
+	cleanedLines := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if idx := strings.IndexByte(line, '^'); idx > 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		cleanedLines = append(cleanedLines, line)
+	}
+
+	return strings.Join(cleanedLines, "\n")
+}
+
 func (p *LRCLIBProvider) queryLRCLIB(title, artist, album string, duration int) (*LyricsResult, error) {
 	apiURL := fmt.Sprintf("https://lrclib.net/api/get?track_name=%s&artist_name=%s",
 		url.QueryEscape(title),
@@ -74,7 +92,7 @@ func (p *LRCLIBProvider) queryLRCLIB(title, artist, album string, duration int) 
 
 	if res.SyncedLyrics != "" {
 		return &LyricsResult{
-			Text:     res.SyncedLyrics,
+			Text:     CleanLyricsText(res.SyncedLyrics),
 			Synced:   true,
 			Provider: p.Name(),
 		}, nil
@@ -82,7 +100,7 @@ func (p *LRCLIBProvider) queryLRCLIB(title, artist, album string, duration int) 
 
 	if res.PlainLyrics != "" {
 		return &LyricsResult{
-			Text:     res.PlainLyrics,
+			Text:     CleanLyricsText(res.PlainLyrics),
 			Synced:   false,
 			Provider: p.Name(),
 		}, nil
@@ -91,40 +109,89 @@ func (p *LRCLIBProvider) queryLRCLIB(title, artist, album string, duration int) 
 	return nil, fmt.Errorf("no lyrics content returned")
 }
 
-func (p *LRCLIBProvider) FetchLyrics(title, artist, album string, duration int) (*LyricsResult, error) {
-	primaryArtist := tags.ExtractPrimaryArtist(artist)
-	hasPrimaryArtistFallback := primaryArtist != "" && primaryArtist != artist
+func (p *LRCLIBProvider) queryLRCLIBSearch(title, artist string) (*LyricsResult, error) {
+	apiURL := fmt.Sprintf("https://lrclib.net/api/search?q=%s",
+		url.QueryEscape(title+" "+artist),
+	)
 
-	// Candidates for (artist, album) query stages
+	resp, err := host.HTTPSend(host.HTTPRequest{
+		Method: "GET",
+		URL:    apiURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lrclib search http error: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("lrclib search status code: %d", resp.StatusCode)
+	}
+
+	var results []lrclibResponse
+	if err := json.Unmarshal(resp.Body, &results); err != nil {
+		return nil, fmt.Errorf("lrclib search unmarshal error: %w", err)
+	}
+
+	for _, item := range results {
+		if item.Instrumental {
+			return &LyricsResult{
+				Text:     "[Instrumental]",
+				Synced:   false,
+				Provider: p.Name(),
+			}, nil
+		}
+		if item.SyncedLyrics != "" {
+			return &LyricsResult{
+				Text:     CleanLyricsText(item.SyncedLyrics),
+				Synced:   true,
+				Provider: p.Name(),
+			}, nil
+		}
+		if item.PlainLyrics != "" {
+			return &LyricsResult{
+				Text:     CleanLyricsText(item.PlainLyrics),
+				Synced:   false,
+				Provider: p.Name(),
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no lyrics found in search results")
+}
+
+func (p *LRCLIBProvider) FetchLyrics(title, artist, album string, duration int) (*LyricsResult, error) {
+	titleCandidates := tags.ExtractTitleCandidates(title)
+	artistList := tags.ExtractArtistCandidates(artist)
+
 	type candidate struct {
 		artist string
 		album  string
 	}
 
-	var candidates []candidate
+	var queryStages []candidate
 
-	// Stage 1: Full artist, full album
-	if strings.TrimSpace(album) != "" {
-		candidates = append(candidates, candidate{artist: artist, album: album})
-	}
-	// Stage 2: Full artist, no album (fallback for strict album_name 404s)
-	candidates = append(candidates, candidate{artist: artist, album: ""})
-
-	// Stage 3 & 4: Primary artist fallback (for multi-artist/collaboration strings)
-	if hasPrimaryArtistFallback {
+	for _, a := range artistList {
 		if strings.TrimSpace(album) != "" {
-			candidates = append(candidates, candidate{artist: primaryArtist, album: album})
+			queryStages = append(queryStages, candidate{artist: a, album: album})
 		}
-		candidates = append(candidates, candidate{artist: primaryArtist, album: ""})
+		queryStages = append(queryStages, candidate{artist: a, album: ""})
 	}
 
 	var lastErr error
-	for _, c := range candidates {
-		res, err := p.queryLRCLIB(title, c.artist, c.album, duration)
-		if err == nil && res != nil && res.Text != "" {
-			return res, nil
+	for _, t := range titleCandidates {
+		for _, c := range queryStages {
+			res, err := p.queryLRCLIB(t, c.artist, c.album, duration)
+			if err == nil && res != nil && res.Text != "" {
+				return res, nil
+			}
+			lastErr = err
 		}
-		lastErr = err
+
+		// Search API fallback per title & artist candidate combination
+		for _, a := range artistList {
+			res, err := p.queryLRCLIBSearch(t, a)
+			if err == nil && res != nil && res.Text != "" {
+				return res, nil
+			}
+		}
 	}
 
 	if lastErr != nil {

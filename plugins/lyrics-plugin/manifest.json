@@ -1,7 +1,7 @@
 {
   "name": "Native Tag & Online Lyrics Plugin",
   "author": "Devil_1210",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "Extracts lyrics from native audio metadata tags (USLT, SYLT, LYRICS) and fetches time-synced lyrics from online providers (LRCLIB, lyrics.ovh).",
   "website": "https://github.com/devil1210/navidrome-lyrics-plugin",
   "permissions": {

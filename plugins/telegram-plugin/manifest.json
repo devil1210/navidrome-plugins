@@ -1,7 +1,7 @@
 {
   "name": "Telegram New Album Notifications",
   "author": "Devil_1210",
-  "version": "1.5.1",
+  "version": "1.5.5",
   "description": "Polls Navidrome for newly added albums and sends notifications directly to Telegram, with optional Subsonic cover-art URLs.",
   "website": "https://github.com/devil1210/navidrome-telegram-plugin",
   "config": {
@@ -42,7 +42,7 @@
         "subsonic_base_url": {
           "type": "string",
           "title": "Subsonic Base URL",
-          "description": "Base URL used to build getCoverArt URLs, e.g. https://navidrome.example.com or http://192.168.1.120:4533"
+          "description": "Base URL used to build getCoverArt URLs, e.g. https://navidrome.example.com or http://localhost:4533"
         },
         "use_subsonic_cover_art": {
           "type": "boolean",
@@ -77,7 +77,7 @@
           "type": "string",
           "title": "Message Title Template",
           "description": "Notification title. You can use {album}, {artist}, {id}, and {url} placeholders.",
-          "default": "<h2>📚 {album}</h2>\n<h4>👤 {artist}</h4>\n"
+          "default": "<h2>📚 {album}</h2>\n<h4>👤 {artist}</h4>"
         },
         "message_body": {
           "type": "string",
