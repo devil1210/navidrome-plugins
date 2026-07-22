@@ -460,7 +460,8 @@ func formatSongListTelegram(songs []subsonicSong, parseMode string) string {
 				discHeader = fmt.Sprintf("Disco %d:", g.DiscNumber)
 			}
 
-			sb.WriteString(discHeader + "\n")
+			sb.WriteString(discHeader)
+			sb.WriteString("\n")
 			for _, s := range g.Songs {
 				trackPrefix := ""
 				if s.Track > 0 {
