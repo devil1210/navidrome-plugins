@@ -31,7 +31,7 @@ var (
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.2.0 initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.2.1 initialized")
 	return nil
 }
 
@@ -79,7 +79,6 @@ func getTargetLanguages() ([]string, string) {
 		if code != "" {
 			langs = append(langs, code)
 			if primaryLang == "" {
-				// Normalize region codes to 2-letter ISO language (e.g. mx, us -> es / en)
 				if code == "mx" || code == "ar" || code == "cl" || code == "co" || code == "pe" {
 					primaryLang = "es"
 				} else if code == "us" || code == "gb" || code == "au" || code == "ca" {
@@ -112,6 +111,33 @@ func isAutoTranslateEnabled() bool {
 	return lower == "true" || lower == "1" || lower == "yes"
 }
 
+func cleanBioText(text string) string {
+	t := text
+	if idx := strings.Index(t, "<a href=\"https://www.last.fm/music/"); idx != -1 {
+		t = t[:idx]
+	}
+	if idx := strings.Index(t, "Read more on Last.fm"); idx != -1 {
+		t = t[:idx]
+	}
+	if idx := strings.Index(t, "User-contributed text is available under"); idx != -1 {
+		t = t[:idx]
+	}
+
+	t = strings.ReplaceAll(t, "<p>", "")
+	t = strings.ReplaceAll(t, "</p>", "")
+	t = strings.ReplaceAll(t, "<i>", "")
+	t = strings.ReplaceAll(t, "</i>", "")
+	t = strings.ReplaceAll(t, "<b>", "")
+	t = strings.ReplaceAll(t, "</b>", "")
+
+	return strings.TrimSpace(t)
+}
+
+func isValidBio(text string) bool {
+	cleaned := cleanBioText(text)
+	return len(cleaned) >= 35
+}
+
 func fetchLastFmBio(artist string, lang string) (string, error) {
 	endpoint := fmt.Sprintf("https://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist=%s&api_key=%s&lang=%s&format=json",
 		url.QueryEscape(artist), lastfmAPIKey, lang)
@@ -138,14 +164,15 @@ func fetchLastFmBio(artist string, lang string) (string, error) {
 	}
 
 	bio := data.Artist.Bio.Content
-	if bio == "" || (strings.Contains(bio, "Read more on Last.fm") && len(bio) < 50) {
+	if !isValidBio(bio) {
 		bio = data.Artist.Bio.Summary
 	}
-	if strings.TrimSpace(bio) == "<a href=\"https://www.last.fm/music/" {
-		bio = ""
+	cleaned := cleanBioText(bio)
+	if !isValidBio(cleaned) {
+		return "", fmt.Errorf("no valid biography in last.fm response")
 	}
 
-	return bio, nil
+	return cleaned, nil
 }
 
 func fetchLastFmAlbumDesc(artist, album string, lang string) (string, error) {
@@ -177,8 +204,12 @@ func fetchLastFmAlbumDesc(artist, album string, lang string) (string, error) {
 	if desc == "" {
 		desc = data.Album.Wiki.Summary
 	}
+	cleaned := cleanBioText(desc)
+	if len(cleaned) < 20 {
+		return "", fmt.Errorf("no valid album description")
+	}
 
-	return desc, nil
+	return cleaned, nil
 }
 
 func fetchWikipediaSummary(title string, lang string) (string, error) {
@@ -206,8 +237,9 @@ func fetchWikipediaSummary(title string, lang string) (string, error) {
 		return "", err
 	}
 
-	if data.Extract != "" {
-		return data.Extract, nil
+	cleaned := cleanBioText(data.Extract)
+	if len(cleaned) >= 20 {
+		return cleaned, nil
 	}
 
 	return "", fmt.Errorf("no extract found")
@@ -250,7 +282,7 @@ func translateText(text string, sourceLang string, targetLang string) (string, e
 
 	translated := data.ResponseData.TranslatedText
 	if translated != "" {
-		return translated, nil
+		return cleanBioText(translated), nil
 	}
 
 	return text, nil
@@ -263,15 +295,15 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 	// 1. Try fetching native biography from Last.fm in preferred target languages
 	for _, lang := range targetLangs {
 		bio, err := fetchLastFmBio(req.Name, lang)
-		if err == nil && len(bio) > 30 {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found native biography from Last.fm for %s (lang=%s)", req.Name, lang))
+		if err == nil && isValidBio(bio) {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found valid native biography from Last.fm for %s (lang=%s)", req.Name, lang))
 			return &metadata.ArtistBiographyResponse{Biography: bio}, nil
 		}
 	}
 
 	// 2. Try fetching Wikipedia summary in primary target language
 	wikiNative, errWiki := fetchWikipediaSummary(req.Name, primaryLang)
-	if errWiki == nil && len(wikiNative) > 20 {
+	if errWiki == nil && isValidBio(wikiNative) {
 		pdk.Log(pdk.LogInfo, fmt.Sprintf("Found native Wikipedia summary for %s (lang=%s)", req.Name, primaryLang))
 		return &metadata.ArtistBiographyResponse{Biography: wikiNative}, nil
 	}
@@ -280,10 +312,10 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 	if isAutoTranslateEnabled() {
 		// Try English Last.fm
 		engBio, errEng := fetchLastFmBio(req.Name, "en")
-		if errEng == nil && len(engBio) > 30 {
+		if errEng == nil && isValidBio(engBio) {
 			pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Last.fm bio for %s to %s...", req.Name, primaryLang))
 			translated, errTrans := translateText(engBio, "en", primaryLang)
-			if errTrans == nil && len(translated) > 10 {
+			if errTrans == nil && isValidBio(translated) {
 				return &metadata.ArtistBiographyResponse{Biography: translated}, nil
 			}
 			return &metadata.ArtistBiographyResponse{Biography: engBio}, nil
@@ -291,10 +323,10 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 
 		// Try English Wikipedia
 		wikiEn, errWikiEn := fetchWikipediaSummary(req.Name, "en")
-		if errWikiEn == nil && len(wikiEn) > 20 {
+		if errWikiEn == nil && isValidBio(wikiEn) {
 			pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Wikipedia summary for %s to %s...", req.Name, primaryLang))
 			translated, errTrans := translateText(wikiEn, "en", primaryLang)
-			if errTrans == nil && len(translated) > 10 {
+			if errTrans == nil && isValidBio(translated) {
 				return &metadata.ArtistBiographyResponse{Biography: translated}, nil
 			}
 			return &metadata.ArtistBiographyResponse{Biography: wikiEn}, nil
@@ -306,7 +338,7 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 			if errJa == nil && len(jaText) > 10 {
 				pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating Japanese Wikipedia summary for %s to %s...", req.Name, primaryLang))
 				translated, errTrans := translateText(jaText, "ja", primaryLang)
-				if errTrans == nil && len(translated) > 10 {
+				if errTrans == nil && isValidBio(translated) {
 					return &metadata.ArtistBiographyResponse{Biography: translated}, nil
 				}
 			}
