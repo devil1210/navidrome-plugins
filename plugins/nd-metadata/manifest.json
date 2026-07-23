@@ -1,0 +1,55 @@
+{
+  "name": "ND Metadata",
+  "version": "1.2.0",
+  "description": "Multi-language metadata agent with customizable language and automatic fallback translation (Last.fm, Wikipedia & MyMemory).",
+  "author": "Antigravity",
+  "website": "https://github.com/devil1210/navidrome-plugins",
+  "permissions": {
+    "http": {
+      "reason": "Fetch metadata and translate missing descriptions",
+      "requiredHosts": [
+        "ws.audioscrobbler.com",
+        "api.mymemory.translated.net",
+        "es.wikipedia.org",
+        "en.wikipedia.org",
+        "ja.wikipedia.org",
+        "fr.wikipedia.org",
+        "de.wikipedia.org",
+        "pt.wikipedia.org",
+        "it.wikipedia.org"
+      ]
+    }
+  },
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_language": {
+          "type": "string",
+          "title": "Target Language Codes",
+          "default": "es,mx,us",
+          "description": "Preferred language or storefront codes tried in order (e.g., 'es', 'es,mx,us', 'en,us,gb', 'pt,br')"
+        },
+        "enable_auto_translate": {
+          "type": "boolean",
+          "title": "Enable Automatic Translation",
+          "default": true,
+          "description": "Automatically translate biographies to preferred language if no native biography is available"
+        }
+      }
+    },
+    "uiSchema": {
+      "type": "VerticalLayout",
+      "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/target_language"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/enable_auto_translate"
+        }
+      ]
+    }
+  }
+}

@@ -1,4 +1,4 @@
-module navidrome-lyrics-plugin
+module nd-metadata
 
 go 1.23
 
