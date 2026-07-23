@@ -246,13 +246,17 @@ func fetchWikipediaSummary(title string, lang string) (string, error) {
 }
 
 func translateText(text string, sourceLang string, targetLang string) (string, error) {
-	if len(text) == 0 || sourceLang == targetLang {
+	if len(text) == 0 {
 		return text, nil
 	}
 
 	queryText := text
 	if len(queryText) > 800 {
 		queryText = queryText[:800]
+	}
+
+	if sourceLang == "" || sourceLang == "auto" {
+		sourceLang = "AUTODETECT"
 	}
 
 	langpair := fmt.Sprintf("%s|%s", sourceLang, targetLang)
