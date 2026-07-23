@@ -1,6 +1,6 @@
 {
   "name": "ND Metadata",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "Multi-language metadata agent with customizable language and automatic fallback translation (Last.fm, Wikipedia & MyMemory).",
   "author": "Antigravity",
   "website": "https://github.com/devil1210/navidrome-plugins",
