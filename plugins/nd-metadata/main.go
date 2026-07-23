@@ -31,7 +31,7 @@ var (
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.2.1 initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.3.0 initialized")
 	return nil
 }
 
@@ -109,6 +109,14 @@ func isAutoTranslateEnabled() bool {
 	}
 	lower := strings.ToLower(strings.TrimSpace(cfg))
 	return lower == "true" || lower == "1" || lower == "yes"
+}
+
+func getRefreshIntervalDays() int64 {
+	val, ok := host.ConfigGetInt("refresh_interval_days")
+	if !ok || val < 0 {
+		return 0
+	}
+	return val
 }
 
 func cleanBioText(text string) string {
@@ -294,59 +302,89 @@ func translateText(text string, sourceLang string, targetLang string) (string, e
 
 func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*metadata.ArtistBiographyResponse, error) {
 	targetLangs, primaryLang := getTargetLanguages()
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (target languages: %v, primary: %s)", req.Name, targetLangs, primaryLang))
+	refreshDays := getRefreshIntervalDays()
+	cacheKey := "bio:" + strings.ToLower(req.Name)
+
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (target languages: %v, primary: %s, refresh interval: %d days)", req.Name, targetLangs, primaryLang, refreshDays))
+
+	// 0. If refreshDays > 0, try fetching from KVStore cache
+	if refreshDays > 0 {
+		cachedBioBytes, found, errKV := host.KVStoreGet(cacheKey)
+		if errKV == nil && found && len(cachedBioBytes) > 30 {
+			cachedBio := string(cachedBioBytes)
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s (%d days TTL)", req.Name, refreshDays))
+			return &metadata.ArtistBiographyResponse{Biography: cachedBio}, nil
+		}
+	}
+
+	var resultBio string
 
 	// 1. Try fetching native biography from Last.fm in preferred target languages
 	for _, lang := range targetLangs {
 		bio, err := fetchLastFmBio(req.Name, lang)
 		if err == nil && isValidBio(bio) {
 			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found valid native biography from Last.fm for %s (lang=%s)", req.Name, lang))
-			return &metadata.ArtistBiographyResponse{Biography: bio}, nil
+			resultBio = bio
+			break
 		}
 	}
 
 	// 2. Try fetching Wikipedia summary in primary target language
-	wikiNative, errWiki := fetchWikipediaSummary(req.Name, primaryLang)
-	if errWiki == nil && isValidBio(wikiNative) {
-		pdk.Log(pdk.LogInfo, fmt.Sprintf("Found native Wikipedia summary for %s (lang=%s)", req.Name, primaryLang))
-		return &metadata.ArtistBiographyResponse{Biography: wikiNative}, nil
+	if resultBio == "" {
+		wikiNative, errWiki := fetchWikipediaSummary(req.Name, primaryLang)
+		if errWiki == nil && isValidBio(wikiNative) {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found native Wikipedia summary for %s (lang=%s)", req.Name, primaryLang))
+			resultBio = wikiNative
+		}
 	}
 
 	// 3. Fallback: If auto-translation enabled, fetch English or Japanese bio/wiki and translate to primary target language
-	if isAutoTranslateEnabled() {
+	if resultBio == "" && isAutoTranslateEnabled() {
 		// Try English Last.fm
 		engBio, errEng := fetchLastFmBio(req.Name, "en")
 		if errEng == nil && isValidBio(engBio) {
 			pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Last.fm bio for %s to %s...", req.Name, primaryLang))
 			translated, errTrans := translateText(engBio, "en", primaryLang)
 			if errTrans == nil && isValidBio(translated) {
-				return &metadata.ArtistBiographyResponse{Biography: translated}, nil
+				resultBio = translated
+			} else {
+				resultBio = engBio
 			}
-			return &metadata.ArtistBiographyResponse{Biography: engBio}, nil
 		}
 
 		// Try English Wikipedia
-		wikiEn, errWikiEn := fetchWikipediaSummary(req.Name, "en")
-		if errWikiEn == nil && isValidBio(wikiEn) {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Wikipedia summary for %s to %s...", req.Name, primaryLang))
-			translated, errTrans := translateText(wikiEn, "en", primaryLang)
-			if errTrans == nil && isValidBio(translated) {
-				return &metadata.ArtistBiographyResponse{Biography: translated}, nil
+		if resultBio == "" {
+			wikiEn, errWikiEn := fetchWikipediaSummary(req.Name, "en")
+			if errWikiEn == nil && isValidBio(wikiEn) {
+				pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Wikipedia summary for %s to %s...", req.Name, primaryLang))
+				translated, errTrans := translateText(wikiEn, "en", primaryLang)
+				if errTrans == nil && isValidBio(translated) {
+					resultBio = translated
+				} else {
+					resultBio = wikiEn
+				}
 			}
-			return &metadata.ArtistBiographyResponse{Biography: wikiEn}, nil
 		}
 
 		// Try Japanese Wikipedia for J-Pop / J-Rock (e.g., Atarayo / あたらよ)
-		if strings.EqualFold(req.Name, "Atarayo") || strings.Contains(strings.ToLower(req.Name), "atarayo") {
+		if resultBio == "" && (strings.EqualFold(req.Name, "Atarayo") || strings.Contains(strings.ToLower(req.Name), "atarayo")) {
 			jaText, errJa := fetchWikipediaSummary("あたらよ", "ja")
 			if errJa == nil && len(jaText) > 10 {
 				pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating Japanese Wikipedia summary for %s to %s...", req.Name, primaryLang))
 				translated, errTrans := translateText(jaText, "ja", primaryLang)
 				if errTrans == nil && isValidBio(translated) {
-					return &metadata.ArtistBiographyResponse{Biography: translated}, nil
+					resultBio = translated
 				}
 			}
 		}
+	}
+
+	if resultBio != "" {
+		if refreshDays > 0 {
+			ttlSeconds := refreshDays * 86400
+			_ = host.KVStoreSetWithTTL(cacheKey, []byte(resultBio), ttlSeconds)
+		}
+		return &metadata.ArtistBiographyResponse{Biography: resultBio}, nil
 	}
 
 	return nil, fmt.Errorf("no biography found for artist %s", req.Name)
