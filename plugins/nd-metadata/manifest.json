@@ -1,7 +1,7 @@
 {
   "name": "ND Metadata",
-  "version": "1.4.1",
-  "description": "Multi-language text metadata agent supporting Last.fm, Wikipedia, Genius, Apple Music, Deezer and Discogs with configurable source priority, auto-translation and artist image reset controls.",
+  "version": "1.4.2",
+  "description": "Multi-language text metadata agent supporting Wikipedia, Last.fm, Genius, Apple Music, Deezer and Discogs with intelligent junk filter, configurable source priority, auto-translation and artist image reset controls.",
   "author": "Antigravity",
   "website": "https://github.com/devil1210/navidrome-plugins",
   "permissions": {
@@ -34,8 +34,8 @@
         "source_priority": {
           "type": "string",
           "title": "Orden de Prioridad de Fuentes (Source Priority)",
-          "default": "lastfm,wikipedia,genius,applemusic,deezer,discogs",
-          "description": "Lista de fuentes separadas por coma en orden de preferencia (ej. 'lastfm,wikipedia,genius,applemusic,deezer,discogs' o 'wikipedia,lastfm,genius')."
+          "default": "wikipedia,lastfm,genius,applemusic,deezer,discogs",
+          "description": "Lista de fuentes separadas por coma en orden de preferencia (ej. 'wikipedia,lastfm,genius,applemusic,deezer,discogs')."
         },
         "target_language": {
           "type": "string",
