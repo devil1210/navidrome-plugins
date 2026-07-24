@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
 	"github.com/navidrome/navidrome/plugins/pdk/go/lifecycle"
@@ -32,7 +31,7 @@ var (
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.3.1 initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.3.2 initialized")
 	return nil
 }
 
@@ -63,11 +62,6 @@ type myMemoryResponse struct {
 	ResponseData struct {
 		TranslatedText string `json:"translatedText"`
 	} `json:"responseData"`
-}
-
-type cachedBioItem struct {
-	Bio       string `json:"bio"`
-	Timestamp int64  `json:"timestamp"`
 }
 
 func getTargetLanguages() ([]string, string) {
@@ -313,19 +307,12 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (target languages: %v, primary: %s, refresh interval: %d days)", req.Name, targetLangs, primaryLang, refreshDays))
 
-	// 0. If refreshDays > 0, try fetching from KVStore cache with custom timestamp
+	// 0. If refreshDays > 0, try fetching from host cache
 	if refreshDays > 0 {
-		cachedBioBytes, found, errKV := host.KVStoreGet(cacheKey)
-		if errKV == nil && found && len(cachedBioBytes) > 0 {
-			var item cachedBioItem
-			if err := json.Unmarshal(cachedBioBytes, &item); err == nil && len(item.Bio) > 30 {
-				now := time.Now().Unix()
-				ttlSeconds := refreshDays * 86400
-				if now-item.Timestamp < ttlSeconds {
-					pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s (%d days TTL)", req.Name, refreshDays))
-					return &metadata.ArtistBiographyResponse{Biography: item.Bio}, nil
-				}
-			}
+		cachedBio, found, errCache := host.CacheGetString(cacheKey)
+		if errCache == nil && found && len(cachedBio) > 30 {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s (%d days TTL)", req.Name, refreshDays))
+			return &metadata.ArtistBiographyResponse{Biography: cachedBio}, nil
 		}
 	}
 
@@ -393,13 +380,8 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 
 	if resultBio != "" {
 		if refreshDays > 0 {
-			item := cachedBioItem{
-				Bio:       resultBio,
-				Timestamp: time.Now().Unix(),
-			}
-			if itemBytes, err := json.Marshal(item); err == nil {
-				_ = host.KVStoreSet(cacheKey, itemBytes)
-			}
+			ttlSeconds := refreshDays * 86400
+			_ = host.CacheSetString(cacheKey, resultBio, ttlSeconds)
 		}
 		return &metadata.ArtistBiographyResponse{Biography: resultBio}, nil
 	}
