@@ -1,15 +1,22 @@
 {
   "name": "ND Metadata",
-  "version": "1.3.2",
-  "description": "Multi-language metadata agent with customizable language, auto-translation and configurable refresh interval.",
+  "version": "1.4.0",
+  "description": "Multi-language text metadata agent supporting Last.fm, Wikipedia, Genius, Apple Music, Deezer and Discogs with configurable source priority, auto-translation and refresh controls.",
   "author": "Antigravity",
   "website": "https://github.com/devil1210/navidrome-plugins",
   "permissions": {
     "http": {
-      "reason": "Fetch metadata and translate missing descriptions",
+      "reason": "Fetch text metadata and translate missing descriptions",
       "requiredHosts": [
         "ws.audioscrobbler.com",
         "api.mymemory.translated.net",
+        "genius.com",
+        "api.genius.com",
+        "itunes.apple.com",
+        "music.apple.com",
+        "api.deezer.com",
+        "api.discogs.com",
+        "www.discogs.com",
         "es.wikipedia.org",
         "en.wikipedia.org",
         "ja.wikipedia.org",
@@ -24,11 +31,17 @@
     "schema": {
       "type": "object",
       "properties": {
+        "source_priority": {
+          "type": "string",
+          "title": "Orden de Prioridad de Fuentes (Source Priority)",
+          "default": "lastfm,wikipedia,genius,applemusic,deezer,discogs",
+          "description": "Lista de fuentes separadas por coma en orden de preferencia (ej. 'lastfm,wikipedia,genius,applemusic,deezer,discogs' o 'wikipedia,lastfm,genius')."
+        },
         "target_language": {
           "type": "string",
           "title": "Target Language Codes",
           "default": "es,mx,us",
-          "description": "Preferred language or storefront codes tried in order (e.g., 'es', 'es,mx,us', 'en,us,gb', 'pt,br')"
+          "description": "Preferred language codes tried in order (e.g., 'es', 'es,mx,us', 'en,us,gb', 'pt,br')"
         },
         "enable_auto_translate": {
           "type": "boolean",
@@ -47,6 +60,10 @@
     "uiSchema": {
       "type": "VerticalLayout",
       "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/source_priority"
+        },
         {
           "type": "Control",
           "scope": "#/properties/target_language"

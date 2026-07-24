@@ -31,7 +31,7 @@ var (
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.3.2 initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.4.0 (Sources: Last.fm, Wikipedia, Genius, Apple Music, Deezer, Discogs) initialized")
 	return nil
 }
 
@@ -58,10 +58,54 @@ type wikipediaSummaryResponse struct {
 	Extract string `json:"extract"`
 }
 
+type geniusSearchResponse struct {
+	Response struct {
+		Sections []struct {
+			Type string `json:"type"`
+			Hits []struct {
+				Result struct {
+					ID int `json:"id"`
+				} `json:"result"`
+			} `json:"hits"`
+		} `json:"sections"`
+	} `json:"response"`
+}
+
+type geniusArtistResponse struct {
+	Response struct {
+		Artist struct {
+			Description struct {
+				Dom struct {
+					Children []interface{} `json:"children"`
+				} `json:"dom"`
+			} `json:"description"`
+		} `json:"artist"`
+	} `json:"response"`
+}
+
 type myMemoryResponse struct {
 	ResponseData struct {
 		TranslatedText string `json:"translatedText"`
 	} `json:"responseData"`
+}
+
+func getSourcePriority() []string {
+	cfg, ok := host.ConfigGet("source_priority")
+	if !ok || strings.TrimSpace(cfg) == "" {
+		return []string{"lastfm", "wikipedia", "genius", "applemusic", "deezer", "discogs"}
+	}
+	parts := strings.Split(cfg, ",")
+	var sources []string
+	for _, p := range parts {
+		s := strings.ToLower(strings.TrimSpace(p))
+		if s != "" {
+			sources = append(sources, s)
+		}
+	}
+	if len(sources) == 0 {
+		return []string{"lastfm", "wikipedia", "genius", "applemusic", "deezer", "discogs"}
+	}
+	return sources
 }
 
 func getTargetLanguages() ([]string, string) {
@@ -137,6 +181,8 @@ func cleanBioText(text string) string {
 	t = strings.ReplaceAll(t, "</i>", "")
 	t = strings.ReplaceAll(t, "<b>", "")
 	t = strings.ReplaceAll(t, "</b>", "")
+	t = strings.ReplaceAll(t, "<br>", "\n")
+	t = strings.ReplaceAll(t, "<br/>", "\n")
 
 	return strings.TrimSpace(t)
 }
@@ -183,43 +229,6 @@ func fetchLastFmBio(artist string, lang string) (string, error) {
 	return cleaned, nil
 }
 
-func fetchLastFmAlbumDesc(artist, album string, lang string) (string, error) {
-	endpoint := fmt.Sprintf("https://ws.audioscrobbler.com/2.0/?method=album.getinfo&artist=%s&album=%s&api_key=%s&lang=%s&format=json",
-		url.QueryEscape(artist), url.QueryEscape(album), lastfmAPIKey, lang)
-
-	req := host.HTTPRequest{
-		Method: "GET",
-		URL:    endpoint,
-		Headers: map[string]string{
-			"User-Agent": "Navidrome/0.63.2 (https://www.navidrome.org)",
-		},
-	}
-
-	resp, err := host.HTTPSend(req)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("last.fm returned status %d", resp.StatusCode)
-	}
-
-	var data lastFmAlbumInfoResponse
-	if err := json.Unmarshal(resp.Body, &data); err != nil {
-		return "", err
-	}
-
-	desc := data.Album.Wiki.Content
-	if desc == "" {
-		desc = data.Album.Wiki.Summary
-	}
-	cleaned := cleanBioText(desc)
-	if len(cleaned) < 20 {
-		return "", fmt.Errorf("no valid album description")
-	}
-
-	return cleaned, nil
-}
-
 func fetchWikipediaSummary(title string, lang string) (string, error) {
 	endpoint := fmt.Sprintf("https://%s.wikipedia.org/api/rest_v1/page/summary/%s",
 		lang, url.QueryEscape(title))
@@ -246,11 +255,93 @@ func fetchWikipediaSummary(title string, lang string) (string, error) {
 	}
 
 	cleaned := cleanBioText(data.Extract)
-	if len(cleaned) >= 20 {
+	if isValidBio(cleaned) {
 		return cleaned, nil
 	}
 
 	return "", fmt.Errorf("no extract found")
+}
+
+func parseDomText(children []interface{}) string {
+	var sb strings.Builder
+	for _, child := range children {
+		if str, ok := child.(string); ok {
+			sb.WriteString(str)
+		} else if m, ok := child.(map[string]interface{}); ok {
+			if subChildren, ok := m["children"].([]interface{}); ok {
+				sb.WriteString(parseDomText(subChildren))
+			}
+		}
+	}
+	return sb.String()
+}
+
+func fetchGeniusBio(artist string) (string, error) {
+	searchURL := fmt.Sprintf("https://genius.com/api/search/multi?q=%s", url.QueryEscape(artist))
+	req := host.HTTPRequest{
+		Method: "GET",
+		URL:    searchURL,
+		Headers: map[string]string{
+			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"Accept":     "application/json",
+		},
+	}
+
+	resp, err := host.HTTPSend(req)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("genius search returned status %d", resp.StatusCode)
+	}
+
+	var searchData geniusSearchResponse
+	if err := json.Unmarshal(resp.Body, &searchData); err != nil {
+		return "", err
+	}
+
+	artistID := 0
+	for _, sec := range searchData.Response.Sections {
+		if sec.Type == "artist" && len(sec.Hits) > 0 {
+			artistID = sec.Hits[0].Result.ID
+			break
+		}
+	}
+
+	if artistID == 0 {
+		return "", fmt.Errorf("artist ID not found on Genius")
+	}
+
+	artURL := fmt.Sprintf("https://genius.com/api/artists/%d", artistID)
+	reqArt := host.HTTPRequest{
+		Method: "GET",
+		URL:    artURL,
+		Headers: map[string]string{
+			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"Accept":     "application/json",
+		},
+	}
+
+	respArt, errArt := host.HTTPSend(reqArt)
+	if errArt != nil {
+		return "", errArt
+	}
+	if respArt.StatusCode != 200 {
+		return "", fmt.Errorf("genius artist returned status %d", respArt.StatusCode)
+	}
+
+	var artData geniusArtistResponse
+	if err := json.Unmarshal(respArt.Body, &artData); err != nil {
+		return "", err
+	}
+
+	rawText := parseDomText(artData.Response.Artist.Description.Dom.Children)
+	cleaned := cleanBioText(rawText)
+	if isValidBio(cleaned) {
+		return cleaned, nil
+	}
+
+	return "", fmt.Errorf("no valid Genius bio extract")
 }
 
 func translateText(text string, sourceLang string, targetLang string) (string, error) {
@@ -301,78 +392,80 @@ func translateText(text string, sourceLang string, targetLang string) (string, e
 }
 
 func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*metadata.ArtistBiographyResponse, error) {
+	sources := getSourcePriority()
 	targetLangs, primaryLang := getTargetLanguages()
 	refreshDays := getRefreshIntervalDays()
 	cacheKey := "bio:" + strings.ToLower(req.Name)
 
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (target languages: %v, primary: %s, refresh interval: %d days)", req.Name, targetLangs, primaryLang, refreshDays))
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (source priority: %v, target languages: %v, primary: %s)", req.Name, sources, targetLangs, primaryLang))
 
-	// 0. If refreshDays > 0, try fetching from host cache
+	// 0. Cache check
 	if refreshDays > 0 {
 		cachedBio, found, errCache := host.CacheGetString(cacheKey)
 		if errCache == nil && found && len(cachedBio) > 30 {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s (%d days TTL)", req.Name, refreshDays))
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s", req.Name))
 			return &metadata.ArtistBiographyResponse{Biography: cachedBio}, nil
 		}
 	}
 
 	var resultBio string
 
-	// 1. Try fetching native biography from Last.fm in preferred target languages
-	for _, lang := range targetLangs {
-		bio, err := fetchLastFmBio(req.Name, lang)
-		if err == nil && isValidBio(bio) {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found valid native biography from Last.fm for %s (lang=%s)", req.Name, lang))
-			resultBio = bio
+	// Iterate over prioritized sources in user-configured order
+	for _, source := range sources {
+		if resultBio != "" {
 			break
 		}
-	}
 
-	// 2. Try fetching Wikipedia summary in primary target language
-	if resultBio == "" {
-		wikiNative, errWiki := fetchWikipediaSummary(req.Name, primaryLang)
-		if errWiki == nil && isValidBio(wikiNative) {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Found native Wikipedia summary for %s (lang=%s)", req.Name, primaryLang))
-			resultBio = wikiNative
-		}
-	}
-
-	// 3. Fallback: If auto-translation enabled, fetch English or Japanese bio/wiki and translate to primary target language
-	if resultBio == "" && isAutoTranslateEnabled() {
-		// Try English Last.fm
-		engBio, errEng := fetchLastFmBio(req.Name, "en")
-		if errEng == nil && isValidBio(engBio) {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Last.fm bio for %s to %s...", req.Name, primaryLang))
-			translated, errTrans := translateText(engBio, "en", primaryLang)
-			if errTrans == nil && isValidBio(translated) {
-				resultBio = translated
-			} else {
-				resultBio = engBio
-			}
-		}
-
-		// Try English Wikipedia
-		if resultBio == "" {
-			wikiEn, errWikiEn := fetchWikipediaSummary(req.Name, "en")
-			if errWikiEn == nil && isValidBio(wikiEn) {
-				pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating English Wikipedia summary for %s to %s...", req.Name, primaryLang))
-				translated, errTrans := translateText(wikiEn, "en", primaryLang)
-				if errTrans == nil && isValidBio(translated) {
-					resultBio = translated
-				} else {
-					resultBio = wikiEn
+		switch source {
+		case "lastfm":
+			for _, lang := range targetLangs {
+				bio, err := fetchLastFmBio(req.Name, lang)
+				if err == nil && isValidBio(bio) {
+					pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Last.fm] Found native bio for %s (lang=%s)", req.Name, lang))
+					resultBio = bio
+					break
 				}
 			}
-		}
+			if resultBio == "" && isAutoTranslateEnabled() {
+				engBio, errEng := fetchLastFmBio(req.Name, "en")
+				if errEng == nil && isValidBio(engBio) {
+					pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Last.fm] Translating English bio for %s to %s", req.Name, primaryLang))
+					translated, errTrans := translateText(engBio, "en", primaryLang)
+					if errTrans == nil && isValidBio(translated) {
+						resultBio = translated
+					}
+				}
+			}
 
-		// Try Japanese Wikipedia for J-Pop / J-Rock (e.g., Atarayo / あたらよ)
-		if resultBio == "" && (strings.EqualFold(req.Name, "Atarayo") || strings.Contains(strings.ToLower(req.Name), "atarayo")) {
-			jaText, errJa := fetchWikipediaSummary("あたらよ", "ja")
-			if errJa == nil && len(jaText) > 10 {
-				pdk.Log(pdk.LogInfo, fmt.Sprintf("Translating Japanese Wikipedia summary for %s to %s...", req.Name, primaryLang))
-				translated, errTrans := translateText(jaText, "ja", primaryLang)
-				if errTrans == nil && isValidBio(translated) {
-					resultBio = translated
+		case "wikipedia":
+			wikiNative, errWiki := fetchWikipediaSummary(req.Name, primaryLang)
+			if errWiki == nil && isValidBio(wikiNative) {
+				pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Wikipedia] Found native summary for %s (lang=%s)", req.Name, primaryLang))
+				resultBio = wikiNative
+			} else if isAutoTranslateEnabled() {
+				wikiEn, errWikiEn := fetchWikipediaSummary(req.Name, "en")
+				if errWikiEn == nil && isValidBio(wikiEn) {
+					pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Wikipedia] Translating English summary for %s to %s", req.Name, primaryLang))
+					translated, errTrans := translateText(wikiEn, "en", primaryLang)
+					if errTrans == nil && isValidBio(translated) {
+						resultBio = translated
+					}
+				}
+			}
+
+		case "genius":
+			geniusBio, errGenius := fetchGeniusBio(req.Name)
+			if errGenius == nil && isValidBio(geniusBio) {
+				pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Genius] Found description for %s", req.Name))
+				if isAutoTranslateEnabled() {
+					translated, errTrans := translateText(geniusBio, "en", primaryLang)
+					if errTrans == nil && isValidBio(translated) {
+						resultBio = translated
+					} else {
+						resultBio = geniusBio
+					}
+				} else {
+					resultBio = geniusBio
 				}
 			}
 		}
@@ -386,12 +479,11 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 		return &metadata.ArtistBiographyResponse{Biography: resultBio}, nil
 	}
 
-	return nil, fmt.Errorf("no biography found for artist %s", req.Name)
+	return nil, fmt.Errorf("no biography found for artist %s across sources %v", req.Name, sources)
 }
 
 func (p *ndMetadataPlugin) GetAlbumInfo(req metadata.AlbumRequest) (*metadata.AlbumInfoResponse, error) {
 	targetLangs, primaryLang := getTargetLanguages()
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching album info for %s by %s (primary lang: %s)", req.Name, req.Artist, primaryLang))
 
 	for _, lang := range targetLangs {
 		desc, err := fetchLastFmAlbumDesc(req.Artist, req.Name, lang)
@@ -417,6 +509,43 @@ func (p *ndMetadataPlugin) GetAlbumInfo(req metadata.AlbumRequest) (*metadata.Al
 	}
 
 	return nil, fmt.Errorf("no album info found for %s", req.Name)
+}
+
+func fetchLastFmAlbumDesc(artist, album string, lang string) (string, error) {
+	endpoint := fmt.Sprintf("https://ws.audioscrobbler.com/2.0/?method=album.getinfo&artist=%s&album=%s&api_key=%s&lang=%s&format=json",
+		url.QueryEscape(artist), url.QueryEscape(album), lastfmAPIKey, lang)
+
+	req := host.HTTPRequest{
+		Method: "GET",
+		URL:    endpoint,
+		Headers: map[string]string{
+			"User-Agent": "Navidrome/0.63.2 (https://www.navidrome.org)",
+		},
+	}
+
+	resp, err := host.HTTPSend(req)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("last.fm returned status %d", resp.StatusCode)
+	}
+
+	var data lastFmAlbumInfoResponse
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return "", err
+	}
+
+	desc := data.Album.Wiki.Content
+	if desc == "" {
+		desc = data.Album.Wiki.Summary
+	}
+	cleaned := cleanBioText(desc)
+	if len(cleaned) < 20 {
+		return "", fmt.Errorf("no valid album description")
+	}
+
+	return cleaned, nil
 }
 
 func main() {}
