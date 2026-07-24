@@ -6,84 +6,113 @@ from picard import log
 from picard.file import register_file_post_save_processor
 from picard.ui.itemviews import BaseAction, register_album_action, register_track_action
 
-PLUGIN_NAME = "File Deduplicator (Quality Aware)"
+PLUGIN_NAME = "File Deduplicator (Quality & Root Backup)"
 PLUGIN_AUTHOR = "SPbot / devil1210"
-PLUGIN_DESCRIPTION = "Compara la calidad/tamaño entre archivos duplicados (1) y conserva SIEMPRE el de mayor calidad, moviendo el de menor calidad y sus letras a _duplicados_backup."
-PLUGIN_VERSION = "1.3"
+PLUGIN_DESCRIPTION = "Mueve duplicados (1) a M:\\music\\_duplicados_backup y asegura que las letras .lrc queden siempre con el nombre limpio sin (1)."
+PLUGIN_VERSION = "1.4"
 PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13", "3.0"]
 PLUGIN_LICENSE = "GPL-2.0"
 
 DUP_PATTERN = re.compile(r'\s*\(\d+\)$')
 
+def get_backup_dir(dirpath):
+    norm = os.path.normpath(dirpath)
+    if norm.lower().startswith(r"m:\music"):
+        rel = os.path.relpath(norm, r"M:\music")
+        return os.path.join(r"M:\music\_duplicados_backup", rel)
+    return os.path.join(dirpath, "_duplicados_backup")
+
 def get_quality_score(filepath):
-    """
-    Devuelve un puntaje de calidad basado en formato y tamaño de archivo.
-    """
     if not os.path.exists(filepath):
         return 0
     ext = os.path.splitext(filepath)[1].lower()
     size = os.path.getsize(filepath)
     
-    # Formatos sin pérdida reciben la máxima prioridad
     if ext in ['.flac', '.alac', '.wav', '.aiff']:
         base = 10000000000
     elif ext in ['.m4a', '.aac', '.opus']:
         base = 5000000000
-    else:  # .mp3, .ogg
+    else:
         base = 1000000000
         
     return base + size
+
+def sync_lrc_files(dirpath, clean_base, dup_base):
+    clean_lrc = os.path.join(dirpath, clean_base + ".lrc")
+    dup_lrc = os.path.join(dirpath, dup_base + ".lrc")
+    backup_dir = get_backup_dir(dirpath)
+
+    if os.path.exists(dup_lrc):
+        if not os.path.exists(clean_lrc):
+            try:
+                os.rename(dup_lrc, clean_lrc)
+                log.info("File Deduplicator: Renombrada letra %s.lrc -> %s.lrc", dup_base, clean_base)
+            except Exception as e:
+                log.error("File Deduplicator Error renombrando letra: %s", e)
+        else:
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+                dst = os.path.join(backup_dir, dup_base + ".lrc")
+                shutil.move(dup_lrc, dst)
+                log.info("File Deduplicator: Se movió letra duplicada %s.lrc -> %s", dup_base, dst)
+            except Exception as e:
+                log.error("File Deduplicator Error moviendo letra: %s", e)
 
 def handle_duplicate_pair(dirpath, item):
     file_base, ext = os.path.splitext(item)
     if not DUP_PATTERN.search(file_base):
         return False
         
-    orig_name = DUP_PATTERN.sub('', file_base) + ext
+    clean_base = DUP_PATTERN.sub('', file_base)
+    orig_name = clean_base + ext
     dup_file = os.path.join(dirpath, item)
     orig_file = os.path.join(dirpath, orig_name)
     
-    if not os.path.exists(orig_file) or dup_file == orig_file:
-        return False
-        
-    backup_dir = os.path.join(dirpath, "_duplicados_backup")
+    backup_dir = get_backup_dir(dirpath)
     os.makedirs(backup_dir, exist_ok=True)
-    
-    # Para archivos de letras .lrc, mover la versión (1) a backup
+
+    # Para archivos de letras .lrc sueltos
     if ext.lower() == '.lrc':
-        dst = os.path.join(backup_dir, item)
+        sync_lrc_files(dirpath, clean_base, file_base)
+        return True
+
+    # Si el original de audio no existe, renombrar el duplicado al nombre limpio
+    if not os.path.exists(orig_file):
         try:
-            shutil.move(dup_file, dst)
-            log.info("File Deduplicator: Se movió letra duplicada %s -> _duplicados_backup", item)
+            os.rename(dup_file, orig_file)
+            log.info("File Deduplicator: Renombrado audio %s -> %s", item, orig_name)
+            sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            log.error("File Deduplicator: Error al mover letra %s: %s", dup_file, e)
+            log.error("File Deduplicator Error: %s", e)
             return False
-            
-    # Para archivos de audio, comparar calidad
+
+    # Comparar calidad
     score_dup = get_quality_score(dup_file)
     score_orig = get_quality_score(orig_file)
     
     if score_dup > score_orig:
-        # El archivo nuevo (1) tiene MEJOR calidad -> Mover el original viejo a backup y renombrar el nuevo
+        # Nuevo archivo es de MEJOR calidad
         try:
             old_backup_dst = os.path.join(backup_dir, orig_name)
             shutil.move(orig_file, old_backup_dst)
             os.rename(dup_file, orig_file)
-            log.info("File Deduplicator: ¡Nuevo archivo %s tiene MEJOR calidad! Se guardó como principal y el viejo se movió a backup.", item)
+            log.info("File Deduplicator: ¡Nuevo archivo %s tiene MEJOR calidad! Se guardó como principal y el viejo se movió a %s.", item, old_backup_dst)
+            sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            log.error("File Deduplicator: Error al intercambiar mejor calidad: %s", e)
+            log.error("File Deduplicator Error intercambiando mejor calidad: %s", e)
             return False
     else:
-        # El archivo nuevo (1) es de MENOR o IGUAL calidad -> Mover el nuevo (1) a backup y conservar el original
+        # Nuevo archivo es de MENOR o igual calidad
         try:
             dup_backup_dst = os.path.join(backup_dir, item)
             shutil.move(dup_file, dup_backup_dst)
-            log.info("File Deduplicator: Archivo %s es de MENOR calidad. Conservando original y moviendo duplicado a backup.", item)
+            log.info("File Deduplicator: Archivo %s es de MENOR calidad. Conservando original y moviendo duplicado a %s.", item, dup_backup_dst)
+            sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            log.error("File Deduplicator: Error al mover menor calidad: %s", e)
+            log.error("File Deduplicator Error moviendo menor calidad: %s", e)
             return False
 
 def process_directory_duplicates(dirpath):
@@ -111,7 +140,7 @@ def remove_duplicate_artifacts(file):
         log.error("File Deduplicator Error: %s", e)
 
 class MoveDuplicatesAction(BaseAction):
-    NAME = 'Mover duplicados (1) a _duplicados_backup (Inteligente por Calidad)'
+    NAME = 'Mover duplicados (1) a M:\\music\\_duplicados_backup'
 
     def callback(self, objs):
         dirs_to_scan = set()
