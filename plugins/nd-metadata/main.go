@@ -31,7 +31,7 @@ var (
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.4.0 (Sources: Last.fm, Wikipedia, Genius, Apple Music, Deezer, Discogs) initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.4.1 initialized")
 	return nil
 }
 
@@ -155,12 +155,13 @@ func isAutoTranslateEnabled() bool {
 	return lower == "true" || lower == "1" || lower == "yes"
 }
 
-func getRefreshIntervalDays() int64 {
-	val, ok := host.ConfigGetInt("refresh_interval_days")
-	if !ok || val < 0 {
-		return 0
+func isResetArtistImagesEnabled() bool {
+	cfg, ok := host.ConfigGet("reset_artist_images")
+	if !ok {
+		return true
 	}
-	return val
+	lower := strings.ToLower(strings.TrimSpace(cfg))
+	return lower == "true" || lower == "1" || lower == "yes"
 }
 
 func cleanBioText(text string) string {
@@ -394,19 +395,9 @@ func translateText(text string, sourceLang string, targetLang string) (string, e
 func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*metadata.ArtistBiographyResponse, error) {
 	sources := getSourcePriority()
 	targetLangs, primaryLang := getTargetLanguages()
-	refreshDays := getRefreshIntervalDays()
-	cacheKey := "bio:" + strings.ToLower(req.Name)
+	resetImages := isResetArtistImagesEnabled()
 
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (source priority: %v, target languages: %v, primary: %s)", req.Name, sources, targetLangs, primaryLang))
-
-	// 0. Cache check
-	if refreshDays > 0 {
-		cachedBio, found, errCache := host.CacheGetString(cacheKey)
-		if errCache == nil && found && len(cachedBio) > 30 {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Returning cached biography for artist %s", req.Name))
-			return &metadata.ArtistBiographyResponse{Biography: cachedBio}, nil
-		}
-	}
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching biography for artist: %s (resetImages=%v, source priority: %v, target languages: %v, primary: %s)", req.Name, resetImages, sources, targetLangs, primaryLang))
 
 	var resultBio string
 
@@ -472,10 +463,6 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 	}
 
 	if resultBio != "" {
-		if refreshDays > 0 {
-			ttlSeconds := refreshDays * 86400
-			_ = host.CacheSetString(cacheKey, resultBio, ttlSeconds)
-		}
 		return &metadata.ArtistBiographyResponse{Biography: resultBio}, nil
 	}
 

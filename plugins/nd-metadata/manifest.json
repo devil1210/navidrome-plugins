@@ -1,7 +1,7 @@
 {
   "name": "ND Metadata",
-  "version": "1.4.0",
-  "description": "Multi-language text metadata agent supporting Last.fm, Wikipedia, Genius, Apple Music, Deezer and Discogs with configurable source priority, auto-translation and refresh controls.",
+  "version": "1.4.1",
+  "description": "Multi-language text metadata agent supporting Last.fm, Wikipedia, Genius, Apple Music, Deezer and Discogs with configurable source priority, auto-translation and artist image reset controls.",
   "author": "Antigravity",
   "website": "https://github.com/devil1210/navidrome-plugins",
   "permissions": {
@@ -43,6 +43,12 @@
           "default": "es,mx,us",
           "description": "Preferred language codes tried in order (e.g., 'es', 'es,mx,us', 'en,us,gb', 'pt,br')"
         },
+        "reset_artist_images": {
+          "type": "boolean",
+          "title": "Refrescar Imagen de Artista al Agregar Álbumes",
+          "default": true,
+          "description": "Si está activado, vacía las URLs de imagen previas al detectar un nuevo álbum para obligar a Navidrome a buscar fotos frescas del artista."
+        },
         "enable_auto_translate": {
           "type": "boolean",
           "title": "Enable Automatic Translation",
@@ -67,6 +73,10 @@
         {
           "type": "Control",
           "scope": "#/properties/target_language"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/reset_artist_images"
         },
         {
           "type": "Control",
