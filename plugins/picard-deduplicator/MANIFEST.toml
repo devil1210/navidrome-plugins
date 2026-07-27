@@ -1,0 +1,11 @@
+uuid = "2b83a231-23fb-4dc2-a0f0-8865f8f343f4"
+name = "File Deduplicator (Quality & Root Backup)"
+version = "1.0.0"
+authors = ['Developer']
+description = "Detects and moves duplicate audio files based on quality and bitrate into backup directory."
+categories = ['other', 'ui']
+homepage = "https://github.com/devil1210/picard-deduplicator"
+report_bugs_to = "https://github.com/devil1210/picard-deduplicator"
+api = ["3.0"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
