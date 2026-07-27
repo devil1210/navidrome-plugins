@@ -1,24 +1,21 @@
+from picard.config import config
+from picard import log
 # -*- coding: utf-8 -*-
-PLUGIN_NAME = "Auto Romanizer"
-PLUGIN_AUTHOR = "SPbot"
-PLUGIN_DESCRIPTION = (
-    "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji "
-    "preservando metadatos originales. En modo Automático conserva títulos que "
-    "ya tienen traducción al inglés/Romaji desde el archivo original."
+
+from picard.plugin3.api import PluginApi
+
+from picard.plugin3.api import (
+    File,
+    Metadata,
+    OptionsPage,
 )
-PLUGIN_VERSION = "3.22"
-PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
-                       "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
-PLUGIN_LICENSE = "GPL-2.0"
 
 import os
 import re
 import json
 import subprocess
 
-from picard import config, log
-from picard.metadata import register_track_metadata_processor, register_album_metadata_processor
-from picard.ui.options import OptionsPage, register_options_page
+
 
 LOCAL_SCRIPT = os.path.join(os.path.dirname(__file__), "romanizer.py")
 SPBOT_SCRIPT = r"E:\Descargas\SPbot\scripts\romanizer.py"
@@ -58,6 +55,43 @@ def already_has_latin_translation(text):
             if words and any(w not in LATIN_META_WORDS for w in words):
                 has_latin = True
     return has_jp and has_latin
+
+
+
+
+def _extract_local_title_from_file(f):
+    if not f:
+        return None
+    for attr in ('orig_metadata', 'metadata'):
+        meta = getattr(f, attr, None)
+        if not meta:
+            continue
+        for key in ('title', 'originaltitle', '_original_title'):
+            t = meta.get(key, '')
+            if isinstance(t, list) and t:
+                t = t[0]
+            if t:
+                clean_t = _strip_track_num_prefix(str(t))
+                if already_has_latin_translation(clean_t) or contains_japanese(clean_t):
+                    return clean_t
+    filename = getattr(f, 'filename', '')
+    if filename:
+        basename = os.path.splitext(os.path.basename(filename))[0]
+        clean_name = _strip_track_num_prefix(basename)
+        if already_has_latin_translation(clean_name) or contains_japanese(clean_name):
+            return clean_name
+    return None
+
+
+def _get_latin_part(dual_title):
+    if not dual_title:
+        return ""
+    parts = re.split(r'\s*[\-\–\—\/]\s*', dual_title)
+    for p in parts:
+        p = p.strip()
+        if not contains_japanese(p):
+            return p
+    return ""
 
 
 def _strip_track_num_prefix(text):
@@ -140,7 +174,8 @@ def _make_cache_key(text, track_num=None):
     return jp_key
 
 
-def _on_file_loaded(file_):
+def _on_file_loaded(*args):
+    file_ = args[-1]
     """Fired whenever a file is loaded in Picard.
     Reads original embedded metadata or filename and caches its dual-language title.
     """
@@ -208,17 +243,7 @@ def _on_file_loaded(file_):
                 _ORIGINAL_LATIN_CACHE["{}:{}".format(track_num, l_key)] = clean_name
 
 
-try:
-    from picard.file import register_file_post_load_processor
-    register_file_post_load_processor(_on_file_loaded)
-    log.debug("Auto Romanizer: file_post_load_processor registered successfully")
-except (ImportError, AttributeError):
-    try:
-        from picard.plugin import register_file_post_load_processor
-        register_file_post_load_processor(_on_file_loaded)
-        log.debug("Auto Romanizer: file_post_load_processor registered via picard.plugin")
-    except (ImportError, AttributeError):
-        log.debug("Auto Romanizer: register_file_post_load_processor unavailable")
+
 
 def romanize_dict(tags_dict):
     if not os.path.exists(SCRIPT_PATH):
@@ -254,11 +279,10 @@ def _clean_internal_tags(metadata):
 
 # ── Metadata processors ───────────────────────────────────────────────────────
 
-def process_track(tagger, metadata, track, release):
-    mode = config.setting[TITLE_MODE_OPTION] \
-        if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
+def process_track(api, track, metadata, track_node, release_node):
+    cfg = api.plugin_config if (api and hasattr(api, "plugin_config")) else (api.global_config.setting if (api and hasattr(api, "global_config")) else config.setting)
+    mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else (cfg[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in cfg else DEFAULT_MODE)
 
-    # Preserve originals before we touch anything
     if metadata.get('title') and 'originaltitle' not in metadata:
         metadata['originaltitle'] = metadata['title']
     if metadata.get('artist') and 'originalartist' not in metadata:
@@ -268,150 +292,74 @@ def process_track(tagger, metadata, track, release):
     _clean_internal_tags(metadata)
 
     orig_title = metadata.get('title', '')
-    if orig_title and contains_japanese(orig_title):
-        if mode == "auto":
-            dual = None
-            raw_key = _extract_base_jp(orig_title)
-            track_num = metadata.get('tracknumber', '')
-            if isinstance(track_num, list) and track_num:
-                track_num = track_num[0]
-            track_num = str(track_num).split('/')[0].strip() if track_num else None
-            key = _make_cache_key(orig_title, track_num)
+    if isinstance(orig_title, list) and orig_title:
+        orig_title = orig_title[0]
 
-            # 0. Check linked files directly first (highest priority)
-            linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
-            for f in linked_files:
-                for attr in ('orig_metadata', 'metadata'):
-                    meta = getattr(f, attr, None)
-                    if not meta:
-                        continue
-                    t = meta.get('title', '')
-                    if isinstance(t, list) and t:
-                        t = t[0]
-                    if t and already_has_latin_translation(t):
-                        fk = _extract_base_jp(t)
-                        if fk and raw_key and (fk == raw_key or fk in raw_key or raw_key in fk):
-                            dual = _strip_track_num_prefix(t)
-                            break
-                if dual:
-                    break
+    # Find any local Japanese or Dual title from linked files or tagger
+    local_title = None
+    linked_files = getattr(track, 'files', []) or getattr(track, 'linked_files', [])
+    for f in linked_files:
+        local_title = _extract_local_title_from_file(f)
+        if local_title:
+            break
 
-            # 1. Check track-number specific cache (e.g. "14:帰りたくなったよ")
-            if not dual and key and key in _ORIGINAL_DUAL_CACHE:
-                dual = _ORIGINAL_DUAL_CACHE[key]
-                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE track key: %r for key=%r", dual, key)
+    if not local_title and tagger:
+        all_files = getattr(tagger, 'files', {}) or {}
+        for fn, f in all_files.items():
+            local_title = _extract_local_title_from_file(f)
+            if local_title:
+                break
 
-            # 2. Check raw Japanese cache
-            if not dual and raw_key and raw_key in _ORIGINAL_DUAL_CACHE:
-                dual = _ORIGINAL_DUAL_CACHE[raw_key]
-                log.debug("Auto Romanizer: MATCHED via _ORIGINAL_DUAL_CACHE raw key: %r for raw_key=%r", dual, raw_key)
+    # Determine base Japanese / Dual title to work with
+    target_jp_or_dual = local_title if local_title else orig_title
 
-            # 3. Search unlinked files in tagger.files
-            if not dual:
-                dual = _find_dual_title_in_tagger(tagger, orig_title)
-
-            if dual:
-                clean_dual = _strip_track_num_prefix(dual)
-                metadata['title'] = clean_dual
-                metadata['originaltitle'] = clean_dual
-            else:
-                # No dual original found – generate dual (Japonés - Romaji)
-                result = romanize_dict({'title': orig_title})
-                romaji = result.get('title', orig_title)
-                if romaji and romaji != orig_title:
-                    metadata['title'] = "{} - {}".format(orig_title, romaji)
-
-        elif mode == "japanese":
-            pass  # Leave Japanese title untouched
-
-        elif mode == "dual":
-            result = romanize_dict({'title': orig_title})
-            romaji = result.get('title', orig_title)
-            if romaji and romaji != orig_title:
-                metadata['title'] = "{} - {}".format(orig_title, romaji)
-
-        else:  # romaji
-            result = romanize_dict({'title': orig_title})
-            if 'title' in result:
-                metadata['title'] = result['title']
-
-    elif orig_title and not contains_japanese(orig_title):
-        # Non-Japanese track (e.g., "Message" or "Happy Smile Again")
-        if mode == "auto":
-            track_num = metadata.get('tracknumber', '')
-            if isinstance(track_num, list) and track_num:
-                track_num = track_num[0]
-            track_num = str(track_num).split('/')[0].strip() if track_num else None
-            l_key = orig_title.strip().lower()
-
-            latin_title = None
-
-            # 0. Check linked files directly
-            linked_files = getattr(track, 'linked_files', None) or getattr(track, 'files', [])
-            for f in linked_files:
-                for attr in ('orig_metadata', 'metadata'):
-                    meta = getattr(f, attr, None)
-                    if not meta:
-                        continue
-                    t = meta.get('title', '')
-                    if isinstance(t, list) and t:
-                        t = t[0]
-                    if t and t.lower().strip() == l_key:
-                        latin_title = t
+    if target_jp_or_dual:
+        if already_has_latin_translation(target_jp_or_dual):
+            # Already dual (e.g. "カタオモイ - Kataomoi")
+            if mode in ("auto", "dual"):
+                metadata['title'] = target_jp_or_dual
+                metadata['originaltitle'] = target_jp_or_dual
+            elif mode == "japanese":
+                parts = re.split(r'\s*[\-\–\—\/]\s*', target_jp_or_dual)
+                for p in parts:
+                    if contains_japanese(p):
+                        metadata['title'] = p.strip()
                         break
-                if latin_title:
-                    break
+            elif mode == "romaji":
+                lat = _get_latin_part(target_jp_or_dual)
+                if lat:
+                    metadata['title'] = lat
 
-            # 1. Check _ORIGINAL_LATIN_CACHE by track number key
-            if not latin_title and track_num:
-                tn_key = "{}:{}".format(track_num, l_key)
-                if tn_key in _ORIGINAL_LATIN_CACHE:
-                    latin_title = _ORIGINAL_LATIN_CACHE[tn_key]
-                    log.debug("Auto Romanizer: MATCHED Latin title via track key: %r", latin_title)
+        elif contains_japanese(target_jp_or_dual):
+            # Pure Japanese title (e.g. "カタオモイ")
+            clean_jp = _strip_track_num_prefix(target_jp_or_dual)
+            if mode in ("auto", "dual"):
+                result = romanize_dict({'title': clean_jp})
+                romaji = result.get('title', clean_jp)
+                if romaji and romaji != clean_jp:
+                    metadata['title'] = f"{clean_jp} - {romaji}"
+                    metadata['originaltitle'] = f"{clean_jp} - {romaji}"
+                else:
+                    metadata['title'] = clean_jp
+            elif mode == "japanese":
+                metadata['title'] = clean_jp
+            elif mode == "romaji":
+                result = romanize_dict({'title': clean_jp})
+                romaji = result.get('title', clean_jp)
+                metadata['title'] = romaji
 
-            # 2. Check _ORIGINAL_LATIN_CACHE by lowercased title
-            if not latin_title and l_key in _ORIGINAL_LATIN_CACHE:
-                latin_title = _ORIGINAL_LATIN_CACHE[l_key]
-                log.debug("Auto Romanizer: MATCHED Latin title via l_key: %r", latin_title)
-
-            # 3. Check tagger.files
-            if not latin_title:
-                all_files = getattr(tagger, 'files', {}) or {}
-                for filename, file_ in all_files.items():
-                    for attr in ('orig_metadata', 'metadata'):
-                        meta = getattr(file_, attr, None)
-                        if meta:
-                            t = meta.get('title', '')
-                            if isinstance(t, list) and t:
-                                t = t[0]
-                            if t and t.lower().strip() == l_key:
-                                latin_title = t
-                                break
-                    if not latin_title:
-                        basename = os.path.splitext(os.path.basename(filename))[0]
-                        clean_name = re.sub(r'^\d+[\s\.\-_]+', '', basename).strip()
-                        clean_name = re.sub(r'^[^\-\–\—\/]+[\-\–\—\/]\s*', '', clean_name).strip()
-                        if clean_name.lower() == l_key:
-                            latin_title = clean_name
-                            break
-                    if latin_title:
-                        break
-
-            if latin_title:
-                metadata['title'] = _strip_track_num_prefix(latin_title)
-
-    # Artist / album – always convert to Romaji regardless of mode
+    # Artist / album – convert Japanese to Romaji
     to_convert = {}
     for k in ('artist', 'album', 'albumartist'):
         v = metadata.get(k)
+        if isinstance(v, list) and v:
+            v = v[0]
         if v and contains_japanese(v):
             to_convert[k] = v
     if to_convert:
         converted = romanize_dict(to_convert)
         for k, v in converted.items():
             metadata[k] = v
-
-
 def process_album(tagger, metadata, release):
     if metadata.get('title') and 'originalalbum' not in metadata:
         metadata['originalalbum'] = metadata['title']
@@ -437,13 +385,12 @@ class AutoRomanizerOptionsPage(OptionsPage):
     TITLE = "Auto Romanizer"
     PARENT = "plugins"
 
-    options = [
-        config.TextOption("setting", TITLE_MODE_OPTION, DEFAULT_MODE),
-    ]
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, api=None):
         super().__init__(parent)
-        from PyQt5 import QtWidgets  # lazy – avoid module-level crash
+        self.api = api
+        super().__init__(parent)
+        from PyQt6 import QtWidgets  # lazy – avoid module-level crash
 
         self.combo_mode = QtWidgets.QComboBox(self)
         self.combo_mode.addItem(
@@ -470,17 +417,26 @@ class AutoRomanizerOptionsPage(OptionsPage):
         vbox.addWidget(group)
         vbox.addStretch()
 
+        def _get_cfg(self):
+        if hasattr(self, 'api') and self.api and hasattr(self.api, 'plugin_config'):
+            return self.api.plugin_config
+        if hasattr(self, 'api') and self.api and hasattr(self.api, 'global_config'):
+            return self.api.global_config.setting
+        return config.setting
+
     def load(self):
-        mode = config.setting[TITLE_MODE_OPTION] \
-            if TITLE_MODE_OPTION in config.setting else DEFAULT_MODE
+        cfg = self._get_cfg()
+        mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else (cfg[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in cfg else DEFAULT_MODE)
         idx = self.combo_mode.findData(mode)
         if idx >= 0:
             self.combo_mode.setCurrentIndex(idx)
 
     def save(self):
-        config.setting[TITLE_MODE_OPTION] = self.combo_mode.currentData()
-
-
-register_track_metadata_processor(process_track)
-register_album_metadata_processor(process_album)
-register_options_page(AutoRomanizerOptionsPage)
+        cfg = self._get_cfg()
+        cfg[TITLE_MODE_OPTION] = self.combo_mode.currentData()
+def enable(api: PluginApi):
+    """Called when plugin is enabled."""
+    api.register_track_metadata_processor(process_track)
+    api.register_album_metadata_processor(process_album)
+    api.register_file_post_load_processor(_on_file_loaded)
+    api.register_options_page(AutoRomanizerOptionsPage)

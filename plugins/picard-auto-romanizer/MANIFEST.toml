@@ -1,0 +1,8 @@
+uuid = "4cf2057d-b9b4-4462-8669-e3ea17dd6656"
+name = "Auto Romanizer"
+authors = ["SPbot"]
+description = """Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales"""
+api = ['3.0']
+license = "GPL-2.0"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+long_description = """Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales. En modo Automático conserva títulos que ya tienen traducción al inglés/Romaji desde el archivo original."""
