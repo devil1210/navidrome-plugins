@@ -417,6 +417,21 @@ def process_album(*args, **kwargs):
         _apply_romanization(None, album, metadata)
 
 
+def on_file_added_to_track(*args, **kwargs):
+    track = None
+    file = None
+    for arg in args:
+        if hasattr(arg, "metadata") and hasattr(arg, "filename"):
+            file = arg
+        elif hasattr(arg, "album") and (hasattr(arg, "files") or hasattr(arg, "linked_files")):
+            track = arg
+
+    if file and hasattr(file, "metadata"):
+        _apply_romanization(None, track, file.metadata, file=file)
+    if track and hasattr(track, "metadata"):
+        _apply_romanization(None, track, track.metadata, file=file)
+
+
 class AutoRomanizerOptionsPage(OptionsPage):
     NAME = "auto_romanizer"
     TITLE = "Auto Romanizer"
