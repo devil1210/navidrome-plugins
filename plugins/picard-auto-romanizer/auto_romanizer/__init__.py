@@ -6,14 +6,11 @@ import re
 import json
 import subprocess
 
-# ── Ensure site-packages is in sys.path so Picard can load pykakasi in-memory (100x FASTER) ──
-for p in [
-    r"C:\Users\charl\AppData\Roaming\Python\Python312\site-packages",
-    r"C:\Users\charl\AppData\Local\Programs\Python\Python312\Lib\site-packages",
-    r"C:\Users\charl\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\site-packages"
-]:
-    if os.path.exists(p) and p not in sys.path:
-        sys.path.insert(0, p)
+# ── Load pykakasi from the vendored copy inside the plugin (works in any Python) ──
+_here = os.path.dirname(os.path.abspath(__file__))
+_vendor = os.path.join(_here, "vendor")
+if os.path.isdir(_vendor) and _vendor not in sys.path:
+    sys.path.insert(0, _vendor)
 
 try:
     from . import romanizer
@@ -54,30 +51,80 @@ def contains_japanese(text: str) -> bool:
     return False
 
 
+def _normalize_for_comparison(s: str) -> str:
+    """Lowercase, strip spaces and non-alphanumeric for phonetic comparison."""
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def _is_romanization_of(latin_text: str, jp_text: str) -> bool:
+    """Return True only if latin_text is a phonetic romanization of jp_text.
+
+    Romanizes jp_text with pykakasi/subprocess and does a fuzzy comparison.
+    This prevents treating unrelated Latin text (e.g. an artist name in feat.)
+    as if it were a translation of the Japanese.
+    """
+    if not latin_text or not jp_text or not contains_japanese(jp_text):
+        return False
+    # Romanize the JP part to see what the expected romanization looks like
+    result = romanize_dict({'_check': jp_text})
+    romanized = result.get('_check', '')
+    if not romanized or romanized == jp_text:
+        return False  # Couldn't romanize (pykakasi unavailable), skip verification
+    lat_norm = _normalize_for_comparison(latin_text)
+    rom_norm = _normalize_for_comparison(romanized)
+    if not lat_norm or not rom_norm:
+        return False
+    # Exact match
+    if lat_norm == rom_norm:
+        return True
+    # One contains the other (handles loanwords back-transliterated differently)
+    shorter, longer = (lat_norm, rom_norm) if len(lat_norm) <= len(rom_norm) else (rom_norm, lat_norm)
+    if shorter in longer:
+        return True
+    # Character overlap > 70% (handles Hepburn vs Kunrei spelling variants)
+    if longer:
+        common = sum(1 for c in shorter if c in longer)
+        if common / len(longer) > 0.70:
+            return True
+    return False
+
+
 def already_has_latin_translation(text: str) -> bool:
+    """Check if a title already has a VERIFIED Latin romanization alongside the Japanese.
+
+    Splits ONLY on hyphens (- \u2013 \u2014) and then VERIFIES the Latin part
+    is actually a romanization of the Japanese part.
+    Does NOT assume any Latin text next to Japanese is a translation.
+
+    Examples:
+      '\u3059\u305a\u3081 (feat. Toaka)'        \u2192 False  (no hyphen-separated Latin)
+      '\u3059\u305a\u3081 - Suzume'             \u2192 True   (Suzume IS romanization of \u3059\u305a\u3081)
+      '\u3059\u305a\u3081 - Toaka'              \u2192 False  (Toaka is NOT romanization of \u3059\u305a\u3081)
+      '\u30d7\u30e9\u30cd\u30bf\u30ea\u30a6\u30e0 - Planetarium' \u2192 True   (loanword fuzzy match)
+    """
     if not text or not contains_japanese(text):
         return False
-    parts = re.split(r'\s*[\-\–\—\(\)]\s*', str(text))
+    # Only split on hyphens \u2014 parentheticals are always qualifiers, not translations
+    parts = re.split(r'\s+[\-\u2013\u2014]\s+', str(text))
     if len(parts) < 2:
         return False
-    has_jp = False
-    has_latin = False
-    for p in parts:
-        p_clean = p.strip()
-        if contains_japanese(p_clean):
-            has_jp = True
-        else:
-            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
-            non_meta = [w for w in words if w not in LATIN_META_WORDS]
-            if len(non_meta) >= 1:
-                has_latin = True
-    return has_jp and has_latin
-
+    jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
+    lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and p.strip()]
+    if not jp_parts or not lat_parts:
+        return False
+    # Verify the Latin is actually a romanization of the Japanese
+    for jp in jp_parts:
+        for lat in lat_parts:
+            # Strip trailing parentheticals from Latin before comparing
+            lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
+            if lat_clean and _is_romanization_of(lat_clean, jp):
+                return True
+    return False
 
 def has_dual_structure(text: str) -> bool:
     if not text:
         return False
-    parts = re.split(r'\s*[\-\–\—\/]\s*', str(text))
+    parts = re.split(r'\s+[\-\–\—]\s+', str(text))
     if len(parts) < 2:
         return False
     if contains_japanese(text) and already_has_latin_translation(text):

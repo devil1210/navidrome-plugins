@@ -2,11 +2,13 @@ import os
 import sys
 import json
 import re
-import mutagen
-from mutagen.easyid3 import EasyID3
-from mutagen.flac import FLAC
-from mutagen.mp4 import MP4
-from mutagen.oggvorbis import OggVorbis
+
+# ── Vendor pykakasi bundled inside the plugin so no external Python is needed ──
+_here = os.path.dirname(os.path.abspath(__file__))
+_vendor = os.path.join(_here, "vendor")
+if os.path.isdir(_vendor) and _vendor not in sys.path:
+    sys.path.insert(0, _vendor)
+
 from pykakasi import kakasi
 
 # Inicializar convertidor de japonés a Romaji (Hepburn)
@@ -96,34 +98,43 @@ LATIN_META_WORDS = {
 }
 
 def already_has_latin_translation(text: str) -> bool:
-    """Verifica si un texto ya posee una traducción explícita en alfabeto latino
-    separada por guiones (ej: 'Japonés - Romaji'). No usa barras '/' para no confundir
-    títulos de álbumes o singles dobles (ej: 'Ref:rain / 眩いばかり').
+    """Verifica si un texto ya posee una romanización verificada en la parte latina,
+    separada por guiones (ej: 'すずめ - Suzume').
+    Solo divide por guiones, NUNCA por paréntesis.
+    El contenido parentético (feat. X, live, ver.) es metadata, no una traducción.
     """
     if not contains_japanese(text):
         return False
-    parts = re.split(r'\s*[\-\–\—\(\)]\s*', text)
+    # Solo separamos por guiones — los paréntesis son qualificadores, no traducciones
+    parts = re.split(r'\s+[\-\u2013\u2014]\s+', text)
     if len(parts) < 2:
         return False
-    has_jp = False
-    has_latin = False
-    for p in parts:
-        p_clean = p.strip()
-        if contains_japanese(p_clean):
-            has_jp = True
-        else:
-            words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', p_clean)]
-            non_meta = [w for w in words if w not in LATIN_META_WORDS]
-            if len(non_meta) >= 1:
-                has_latin = True
-    return has_jp and has_latin
+    jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
+    lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and p.strip()]
+    if not jp_parts or not lat_parts:
+        return False
+    # Verificar que la parte latina tenga contenido no-metadata real
+    for lat in lat_parts:
+        lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
+        words = [w.lower().rstrip('.') for w in re.findall(r'[a-zA-Z]{2,}', lat_clean)]
+        non_meta = [w for w in words if w not in LATIN_META_WORDS]
+        if len(non_meta) >= 1:
+            return True
+    return False
+
+
+# Patrón para detectar y extraer qualificadores entre paréntesis al final del título
+_FEAT_TRAILER = re.compile(
+    r'(\s*\(\s*(?:feat|ft|cv|with|w/|prod|arr|vo|orig)\s*\.?\s+[^)]*\))\s*$',
+    re.IGNORECASE
+)
 
 
 def to_romaji(text: str) -> str:
     """
     Convierte SOLO los bloques japoneses de un texto a Romaji (Hepburn).
-    El texto no japonés (inglés, números, símbolos, etc.) se preserva tal cual.
-    Si el texto ya posee un título/traducción en alfabeto latino (ej: 'Japonés - Romaji'), se deja intacto.
+    - Los qualificadores entre paréntesis al final (feat. X, live, ver.) se preservan intactos.
+    - Si el texto ya tiene romanización separada por guión ('JP - Romaji'), se deja intacto.
     """
     if not text:
         return text
@@ -131,12 +142,19 @@ def to_romaji(text: str) -> str:
     if already_has_latin_translation(text):
         return text
 
+    # Extraer el qualificador final si existe (feat. Toaka, live, etc.)
+    trailer = ''
+    m = _FEAT_TRAILER.search(text)
+    if m:
+        trailer = m.group(1)
+        text = text[:m.start()].strip()
+
     non_jp_parts = _JP_SEG.split(text)
     jp_matches   = _JP_SEG.findall(text)
 
-    # Sin japonés: retornar intacto
+    # Sin japonés: retornar intacto (+ trailer)
     if not jp_matches:
-        return text
+        return (text + trailer).strip()
 
     result_parts = []
     for i, part in enumerate(non_jp_parts):
@@ -152,15 +170,17 @@ def to_romaji(text: str) -> str:
             last_char  = left[-1]  if left  else ''
             first_char = right[0]  if right else ''
 
-            # Añadir espacio solo si el caracter adyacente no es ya un separador
             sp_left  = '' if (not last_char  or last_char  in _SEPARATORS) else ' '
             sp_right = '' if (not first_char or first_char in _SEPARATORS) else ' '
 
             result_parts.append(sp_left + rom + sp_right)
 
     result = ''.join(result_parts)
-    result = re.sub(r' {2,}', ' ', result)
-    return result.strip()
+    result = re.sub(r' {2,}', ' ', result).strip()
+    # Reattach the feat. qualifier
+    if trailer:
+        result = result + trailer
+    return result
 
 def romanize_tags(filepath):
     try:
