@@ -9,3 +9,7 @@
 - **NUNCA reiniciar el contenedor Docker `navidrome` (`docker restart navidrome`).**
 - Reiniciar el contenedor borra la configuracion de credenciales activas del usuario.
 - Para actualizar el estado o recargar los plugins, utilizar la interfaz Web/API de Navidrome o el watcher automatico de archivos en `/data/plugins`, sin reiniciar el contenedor.
+
+## Interfaz Web de Navidrome (WebUI Constraints)
+- **NUNCA asumir ni indicarle al usuario que presione botones de "Refrescar Metadatos" en la interfaz web de Navidrome**, ya que dicho botón NO existe en la WebUI estándar para artistas.
+- Todas las actualizaciones de metadatos o recargas deben manejarse automáticamente mediante plugins WASM, tareas programadas (schedulers) o scripts en segundo plano.
