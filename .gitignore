@@ -2,6 +2,8 @@
 .env
 .env.local
 Lista.md
+demora.txt
+roma1.txt
 
 # Compiled WASM binaries & NDP packages
 *.wasm

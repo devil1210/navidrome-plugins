@@ -68,9 +68,9 @@ class Itaiji:
         return self
 
     def __init__(self):
-        if self._itaijidict is None:
+        if not self._itaijidict:
             with self._lock:
-                if self._itaijidict is None:
+                if not self._itaijidict:
                     itaijipath = Configurations.dictpath(Configurations.jisyo_itaiji)
                     with open(itaijipath, "rb") as d:
                         self._itaijidict = pickle.load(d)
@@ -94,9 +94,9 @@ class Kanwa:
         return self
 
     def __init__(self):
-        if self._jisyo_table is None:
+        if not self._jisyo_table:
             with self._lock:
-                if self._jisyo_table is None:
+                if not self._jisyo_table:
                     dictpath = Configurations.dictpath(Configurations.jisyo_kanwa)
                     with open(dictpath, "rb") as d:
                         self._jisyo_table = pickle.load(d)

@@ -13,7 +13,7 @@ except ImportError:
 
 class Configurations:
 
-    data_path = files(__package__) / "data"
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     jisyo_hepburn_hira = "hepburnhira3.db"
     jisyo_passport_hira = "passporthira3.db"
     jisyo_kunrei_hira = "kunreihira3.db"

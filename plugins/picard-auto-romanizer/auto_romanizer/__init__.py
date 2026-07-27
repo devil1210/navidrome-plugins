@@ -1,37 +1,45 @@
 # -*- coding: utf-8 -*-
+#
+# Copyright (C) 2024-2026 Auto Romanizer Plugin for MusicBrainz Picard
+#
 
 import os
 import sys
 import re
-import json
-import subprocess
+from difflib import SequenceMatcher
+from functools import lru_cache
 
-# ── Load pykakasi from the vendored copy inside the plugin (works in any Python) ──
+# ── Load pykakasi from vendored copy inside plugin ──
 _here = os.path.dirname(os.path.abspath(__file__))
 _vendor = os.path.join(_here, "vendor")
-if os.path.isdir(_vendor) and _vendor not in sys.path:
-    sys.path.insert(0, _vendor)
+_roaming_vendor = r"C:\Users\charl\AppData\Roaming\MusicBrainz\Picard\plugins3\auto_romanizer\vendor"
+_roaming_here = r"C:\Users\charl\AppData\Roaming\MusicBrainz\Picard\plugins3\auto_romanizer"
 
+for p in [_vendor, _here, _roaming_vendor, _roaming_here]:
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
+
+_kks = None
 try:
-    from . import romanizer
-except Exception:
-    try:
-        import romanizer
-    except Exception:
-        romanizer = None
+    import pykakasi
+    _kks = pykakasi.kakasi()
+except Exception as e:
+    _kks = None
 
-from picard.config import config
 from picard import log
-from picard.plugin3.api import File, Metadata, OptionsPage, PluginApi
+from picard.config import config
+from picard.plugin3.api import OptionsPage, PluginApi
 
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "Dev"
 PLUGIN_DESCRIPTION = "Automatic Japanese/Romaji title and album romanization"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "1.0.0"
 PLUGIN_API_VERSIONS = ["3.0", "3.1", "3.2"]
 
 TITLE_MODE_OPTION = "auto_romanizer_mode"
 DEFAULT_MODE = "auto"  # "auto" (dual), "japanese", "romaji"
+
+_api = None
 
 LATIN_META_WORDS = {
     'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed',
@@ -53,87 +61,123 @@ def contains_japanese(text: str) -> bool:
 
 def _normalize_for_comparison(s: str) -> str:
     """Lowercase, strip spaces and non-alphanumeric for phonetic comparison."""
-    return re.sub(r'[^a-z0-9]', '', s.lower())
+    return re.sub(r'[^a-z0-9]', '', str(s).lower())
 
 
+def safe_to_romaji(text: str) -> str:
+    if not text or not contains_japanese(text):
+        return text
+    try:
+        import pykakasi
+        kks = pykakasi.kakasi()
+        conv = kks.convert(str(text))
+        if not conv:
+            return str(text)
+        words = []
+        for item in conv:
+            orig = item.get('orig', '')
+            h = item.get('hepburn', '').strip()
+            if not h:
+                if orig:
+                    words.append(orig)
+                continue
+            if orig == '・':
+                words.append('・')
+            elif h.lower() in ('no', 'ga', 'to', 'ni', 'wa', 'o', 'e', 'de', 'mo', 'ka', 'ya', 'na', 'ne', 'wo'):
+                words.append(h.lower())
+            else:
+                words.append(h.capitalize())
+        res = ' '.join(words).strip()
+        res = re.sub(r'\s*([・\-\–\—\(\)])\s*', r'\1', res)
+        res = re.sub(r'\)\s*([a-zA-Z])', r') \1', res)
+        return res if res else str(text)
+    except Exception as e:
+        log.error("Auto Romanizer safe_to_romaji error for %r: %s", text, e)
+        return str(text)
+
+
+def romanize_dict(tags_dict: dict) -> dict:
+    res = {}
+    for k, v in tags_dict.items():
+        if isinstance(v, str) and contains_japanese(v):
+            res[k] = safe_to_romaji(v)
+        else:
+            res[k] = v
+    return res
+
+
+@lru_cache(maxsize=4096)
 def _is_romanization_of(latin_text: str, jp_text: str) -> bool:
-    """Return True only if latin_text is a phonetic romanization of jp_text.
-
-    Romanizes jp_text with pykakasi/subprocess and does a fuzzy comparison.
-    This prevents treating unrelated Latin text (e.g. an artist name in feat.)
-    as if it were a translation of the Japanese.
-    """
+    """Return True only if latin_text is a phonetic romanization of jp_text."""
     if not latin_text or not jp_text or not contains_japanese(jp_text):
         return False
-    # Romanize the JP part to see what the expected romanization looks like
-    result = romanize_dict({'_check': jp_text})
-    romanized = result.get('_check', '')
+    romanized = safe_to_romaji(jp_text)
     if not romanized or romanized == jp_text:
-        return False  # Couldn't romanize (pykakasi unavailable), skip verification
+        return False
     lat_norm = _normalize_for_comparison(latin_text)
     rom_norm = _normalize_for_comparison(romanized)
     if not lat_norm or not rom_norm:
         return False
-    # Exact match
     if lat_norm == rom_norm:
         return True
-    # One contains the other (handles loanwords back-transliterated differently)
     shorter, longer = (lat_norm, rom_norm) if len(lat_norm) <= len(rom_norm) else (rom_norm, lat_norm)
-    if shorter in longer:
+    if len(shorter) >= 4 and shorter in longer:
         return True
-    # Character overlap > 70% (handles Hepburn vs Kunrei spelling variants)
-    if longer:
-        common = sum(1 for c in shorter if c in longer)
-        if common / len(longer) > 0.70:
-            return True
+    ratio = SequenceMatcher(None, lat_norm, rom_norm).ratio()
+    return ratio >= 0.70
+
+
+def _is_corresponding_translation(lat: str, jp: str) -> bool:
+    if not lat or not jp:
+        return False
+    lat_clean = lat.strip()
+    jp_clean = jp.strip()
+
+    if _is_romanization_of(lat_clean, jp_clean):
+        return True
+
+    lat_lower = lat_clean.lower()
+    noise_patterns = [
+        r'^track\s*\d+', r'^\d+$', r'^pista\s*\d+', r'^audio\d*',
+        r'^unknown', r'^untitled', r'^no\s*title', r'^artist',
+        r'^album', r'^disc\s*\d+', r'^flac$', r'^mp3$'
+    ]
+    for pat in noise_patterns:
+        if re.match(pat, lat_lower):
+            return False
+
+    words = [w for w in re.findall(r'[a-zA-Z]{2,}', lat_clean)]
+    if len(words) >= 1:
+        return True
+
     return False
 
 
 def already_has_latin_translation(text: str) -> bool:
-    """Check if a title already has a VERIFIED Latin romanization alongside the Japanese.
-
-    Splits ONLY on hyphens (- \u2013 \u2014) and then VERIFIES the Latin part
-    is actually a romanization of the Japanese part.
-    Does NOT assume any Latin text next to Japanese is a translation.
-
-    Examples:
-      '\u3059\u305a\u3081 (feat. Toaka)'        \u2192 False  (no hyphen-separated Latin)
-      '\u3059\u305a\u3081 - Suzume'             \u2192 True   (Suzume IS romanization of \u3059\u305a\u3081)
-      '\u3059\u305a\u3081 - Toaka'              \u2192 False  (Toaka is NOT romanization of \u3059\u305a\u3081)
-      '\u30d7\u30e9\u30cd\u30bf\u30ea\u30a6\u30e0 - Planetarium' \u2192 True   (loanword fuzzy match)
-    """
+    """Check if text already has a verified corresponding Latin/English translation or Romaji attached."""
     if not text or not contains_japanese(text):
         return False
-    # Only split on hyphens \u2014 parentheticals are always qualifiers, not translations
-    parts = re.split(r'\s+[\-\u2013\u2014]\s+', str(text))
+    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', str(text))
     if len(parts) < 2:
         return False
     jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
-    lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and p.strip()]
-    if not jp_parts or not lat_parts:
-        return False
-    # Verify the Latin is actually a romanization of the Japanese
-    for jp in jp_parts:
-        for lat in lat_parts:
-            # Strip trailing parentheticals from Latin before comparing
-            lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
-            if lat_clean and _is_romanization_of(lat_clean, jp):
-                return True
+    lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and any(c.isalpha() for c in p)]
+    if jp_parts and lat_parts:
+        for jp in jp_parts:
+            for lat in lat_parts:
+                if _is_corresponding_translation(lat, jp):
+                    return True
     return False
+
 
 def has_dual_structure(text: str) -> bool:
     if not text:
         return False
-    parts = re.split(r'\s+[\-\–\—]\s+', str(text))
+    parts = re.split(r'\s*[\-\–\—\/]\s*', str(text))
     if len(parts) < 2:
         return False
     if contains_japanese(text) and already_has_latin_translation(text):
         return True
-    if not contains_japanese(text):
-        w0 = set(re.findall(r'[a-zA-Z0-9]+', parts[0].lower())) - LATIN_META_WORDS
-        w1 = set(re.findall(r'[a-zA-Z0-9]+', parts[1].lower())) - LATIN_META_WORDS
-        if w0 and w1 and (w0 == w1 or w0.issubset(w1) or w1.issubset(w0)):
-            return True
     return False
 
 
@@ -157,7 +201,7 @@ def _normalize_parentheses_title(title_text: str) -> str:
                 next_p = parts[i + 1]
                 words = [w.lower() for w in re.findall(r'[a-zA-Z]{2,}', next_p)]
                 if words and any(w in LATIN_META_WORDS for w in words) and not p.endswith(')'):
-                    clean_next = re.sub(r'[\.\-\_\s]+$', '', next_p)
+                    clean_next = re.sub(r'[\.\-_\s]+$', '', next_p)
                     new_parts.append(f"{p} ({clean_next})")
                     i += 2
                     continue
@@ -232,73 +276,36 @@ def _extract_local_title_from_file(f):
     if filename:
         basename = os.path.splitext(os.path.basename(filename))[0]
         clean_name = _strip_track_num_prefix(basename)
-        if contains_japanese(clean_name):
-            return clean_name
+        parts = re.split(r'\s*[\-\–\—]\s*', clean_name)
+        jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
+        if jp_parts:
+            return jp_parts[-1]
 
     return None
 
 
-def _clean_internal_tags(metadata):
-    pass
-
-
-def safe_to_romaji(text):
-    if not text:
-        return text
-    if romanizer and hasattr(romanizer, 'to_romaji') and getattr(romanizer, 'kks', None) is not None:
+def _get_option(key, default=None):
+    global _api
+    if _api and hasattr(_api, "plugin_config"):
         try:
-            return romanizer.to_romaji(text)
+            val = _api.plugin_config.get(key)
+            if val is not None:
+                return val
         except Exception:
             pass
-    res = romanize_dict({'title': text})
-    return res.get('title', text)
-
-
-PYTHON_PATH = r"C:\Users\charl\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe"
-LOCAL_SCRIPT = os.path.join(os.path.dirname(__file__), "romanizer.py")
-SCRIPT_PATH = LOCAL_SCRIPT if os.path.exists(LOCAL_SCRIPT) else r"E:\Descargas\SPbot\scripts\romanizer.py"
-
-
-def romanize_dict(tags_dict):
-    global romanizer
-    if romanizer and hasattr(romanizer, "to_romaji") and getattr(romanizer, "kks", None) is not None:
+    if hasattr(config, "setting"):
         try:
-            res = {}
-            for k, v in tags_dict.items():
-                if isinstance(v, str) and contains_japanese(v):
-                    res[k] = romanizer.to_romaji(v)
-                else:
-                    res[k] = v
-            return res
-        except Exception as e:
-            log.debug("Auto Romanizer in-process conversion fallback: %s", e)
-
-    if not os.path.exists(SCRIPT_PATH):
-        return tags_dict
-    try:
-        py_exec = PYTHON_PATH if os.path.exists(PYTHON_PATH) else "python"
-        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
-        proc = subprocess.Popen(
-            [py_exec, SCRIPT_PATH, "--json-dict", json.dumps(tags_dict)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=creationflags
-        )
-        out, err = proc.communicate(timeout=5)
-        if not out:
-            if err:
-                log.error("Auto Romanizer: %s", err.decode('utf-8', errors='ignore'))
-            return tags_dict
-        res = json.loads(out.decode('utf-8', errors='ignore'))
-        if isinstance(res, dict) and "error" not in res:
-            return res
-    except Exception as e:
-        log.error("Auto Romanizer exception: %s", e)
-    return tags_dict
+            val = config.setting[key]
+            if val is not None:
+                return val
+        except Exception:
+            pass
+    return default
 
 
 def _apply_romanization(api, track, metadata, file=None):
-    cfg = config.setting
-    mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else DEFAULT_MODE
+    mode = _get_option(TITLE_MODE_OPTION, DEFAULT_MODE)
+    log.info(f"[Auto Romanizer] _apply_romanization called: mode='{mode}', orig_title='{metadata.get('title') if metadata else None}'")
 
     existing_orig_title = None
     if file and hasattr(file, 'orig_metadata') and file.orig_metadata:
@@ -307,8 +314,6 @@ def _apply_romanization(api, track, metadata, file=None):
         existing_orig_title = metadata.get('originaltitle') or metadata.get('_original_title')
     if isinstance(existing_orig_title, list) and existing_orig_title:
         existing_orig_title = existing_orig_title[0]
-
-    _clean_internal_tags(metadata)
 
     orig_title = metadata.get('title', '')
     if isinstance(orig_title, list) and orig_title:
@@ -337,7 +342,7 @@ def _apply_romanization(api, track, metadata, file=None):
                         jp_only = p.strip()
                         break
                 if mode in ("auto", "dual"):
-                    metadata['title'] = _normalize_parentheses_title(target_title)
+                    metadata['title'] = target_title
                 elif mode == "japanese":
                     if jp_only:
                         metadata['title'] = jp_only
@@ -349,16 +354,25 @@ def _apply_romanization(api, track, metadata, file=None):
                 clean_jp = _strip_track_num_prefix(target_title)
                 jp_only = clean_jp
                 if mode in ("auto", "dual"):
-                    romaji = safe_to_romaji(clean_jp)
-                    if romaji and romaji != clean_jp:
-                        metadata['title'] = _normalize_parentheses_title(f"{clean_jp} - {romaji}")
-                    else:
+                    try:
+                        romaji = safe_to_romaji(clean_jp)
+                        log.info(f"[Auto Romanizer] safe_to_romaji('{clean_jp}') produced: '{romaji}'")
+                        if romaji and romaji != clean_jp:
+                            new_t = f"{clean_jp} - {romaji}"
+                            metadata['title'] = new_t
+                            log.info(f"[Auto Romanizer] Converted: '{orig_title}' -> '{new_t}'")
+                        else:
+                            metadata['title'] = clean_jp
+                    except Exception as err:
+                        log.error(f"[Auto Romanizer Error in safe_to_romaji]: {err}", exc_info=True)
                         metadata['title'] = clean_jp
                 elif mode == "japanese":
                     metadata['title'] = clean_jp
                 elif mode == "romaji":
                     romaji = safe_to_romaji(clean_jp)
-                    metadata['title'] = romaji
+                    new_t = romaji if romaji else clean_jp
+                    metadata['title'] = new_t
+                    log.info(f"[Auto Romanizer] Converted (romaji): '{orig_title}' -> '{new_t}'")
         else:
             metadata['title'] = _normalize_parentheses_title(_deduplicate_latin_dual(target_title))
 
@@ -440,43 +454,68 @@ def _apply_romanization(api, track, metadata, file=None):
             metadata[k] = v
 
 
-def process_track(*args, **kwargs):
+def _extract_args(args):
     track = None
+    album = None
+    file = None
     metadata = None
-    for a in args:
-        if hasattr(a, 'album') and (hasattr(a, 'files') or hasattr(a, 'linked_files')):
-            track = a
-        elif hasattr(a, 'getall') or (isinstance(a, dict) and 'title' in a):
-            metadata = a
-    if metadata:
-        _apply_romanization(None, track, metadata)
+
+    if len(args) >= 3 and (hasattr(args[2], 'add_unique') or hasattr(args[2], 'getall') or type(args[2]).__name__ == 'Metadata' or isinstance(args[2], dict)):
+        metadata = args[2]
+        if hasattr(args[1], 'album') or hasattr(args[1], 'linked_files') or type(args[1]).__name__ == 'Track':
+            track = args[1]
+        elif hasattr(args[1], 'tracks'):
+            album = args[1]
+
+    if not metadata:
+        for a in args:
+            if hasattr(a, 'filename') and hasattr(a, 'metadata'):
+                file = a
+            elif hasattr(a, 'tracks') and hasattr(a, 'metadata'):
+                album = a
+            elif hasattr(a, 'album') or hasattr(a, 'linked_files') or type(a).__name__ == 'Track':
+                track = a
+            elif hasattr(a, 'add_unique') or hasattr(a, 'getall') or type(a).__name__ == 'Metadata' or isinstance(a, dict):
+                if type(a).__name__ != 'PluginApi':
+                    metadata = a
+
+    return track, album, file, metadata
+
+
+def process_track(*args, **kwargs):
+    log.info(f"[Auto Romanizer] process_track called with {len(args)} args: {[type(a).__name__ for a in args]}")
+    try:
+        track, album, file, metadata = _extract_args(args)
+        if metadata:
+            _apply_romanization(_api, track, metadata)
+        else:
+            log.warning(f"[Auto Romanizer] process_track: metadata extraction failed from args")
+    except Exception as e:
+        log.error(f"[Auto Romanizer Error in process_track]: {e}", exc_info=True)
 
 
 def process_album(*args, **kwargs):
-    album = None
-    metadata = None
-    for a in args:
-        if hasattr(a, 'tracks') and hasattr(a, 'metadata'):
-            album = a
-        elif hasattr(a, 'getall') or (isinstance(a, dict) and 'title' in a):
-            metadata = a
-    if metadata:
-        _apply_romanization(None, album, metadata)
+    log.info(f"[Auto Romanizer] process_album called with {len(args)} args: {[type(a).__name__ for a in args]}")
+    try:
+        track, album, file, metadata = _extract_args(args)
+        if metadata:
+            _apply_romanization(_api, album, metadata)
+    except Exception as e:
+        log.error(f"[Auto Romanizer Error in process_album]: {e}", exc_info=True)
 
 
 def on_file_added_to_track(*args, **kwargs):
-    track = None
-    file = None
-    for arg in args:
-        if hasattr(arg, "metadata") and hasattr(arg, "filename"):
-            file = arg
-        elif hasattr(arg, "album") and (hasattr(arg, "files") or hasattr(arg, "linked_files")):
-            track = arg
-
-    if file and hasattr(file, "metadata"):
-        _apply_romanization(None, track, file.metadata, file=file)
-    if track and hasattr(track, "metadata"):
-        _apply_romanization(None, track, track.metadata, file=file)
+    log.info(f"[Auto Romanizer] on_file_added_to_track called with {len(args)} args: {[type(a).__name__ for a in args]}")
+    try:
+        track, album, file, metadata = _extract_args(args)
+        if file and hasattr(file, "metadata"):
+            _apply_romanization(_api, track, file.metadata, file=file)
+        if track and hasattr(track, "metadata"):
+            _apply_romanization(_api, track, track.metadata, file=file)
+        if metadata:
+            _apply_romanization(_api, track, metadata, file=file)
+    except Exception as e:
+        log.error(f"[Auto Romanizer Error in on_file_added_to_track]: {e}", exc_info=True)
 
 
 class AutoRomanizerOptionsPage(OptionsPage):
@@ -513,28 +552,28 @@ class AutoRomanizerOptionsPage(OptionsPage):
         vbox.addStretch()
 
     def load(self):
-        cfg = config.setting
-        mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else DEFAULT_MODE
-        idx = self.combo_mode.findData(mode)
-        if idx >= 0:
-            self.combo_mode.setCurrentIndex(idx)
+        mode = _get_option(TITLE_MODE_OPTION, DEFAULT_MODE)
+        index = self.combo_mode.findData(mode)
+        if index >= 0:
+            self.combo_mode.setCurrentIndex(index)
 
     def save(self):
         mode = self.combo_mode.currentData()
+        if hasattr(self, 'api') and self.api and hasattr(self.api, 'plugin_config'):
+            self.api.plugin_config[TITLE_MODE_OPTION] = mode
         config.setting[TITLE_MODE_OPTION] = mode
 
-
-_api = None
 
 def enable(api: PluginApi):
     global _api
     _api = api
-    """Called when plugin is enabled in Picard API v3."""
+    if hasattr(api, "plugin_config") and hasattr(api.plugin_config, "register_option"):
+        try:
+            api.plugin_config.register_option(TITLE_MODE_OPTION, DEFAULT_MODE)
+        except Exception:
+            pass
+    log.info("[Auto Romanizer] Engine v1.0.1 with vendored jaconv initialized!")
     api.register_track_metadata_processor(process_track)
     api.register_album_metadata_processor(process_album)
     api.register_file_post_addition_to_track_processor(on_file_added_to_track)
     api.register_options_page(AutoRomanizerOptionsPage)
-
-def disable(api: PluginApi):
-    global _api
-    _api = None
