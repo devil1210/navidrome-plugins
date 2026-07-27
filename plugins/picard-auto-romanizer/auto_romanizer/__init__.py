@@ -299,12 +299,15 @@ def _apply_romanization(api, track, metadata, file=None):
     cfg = api.plugin_config if (api and hasattr(api, "plugin_config")) else (api.global_config.setting if (api and hasattr(api, "global_config")) else config.setting)
     mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else (cfg[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in cfg else DEFAULT_MODE)
 
-    if metadata.get('title') and 'originaltitle' not in metadata:
-        metadata['originaltitle'] = metadata['title']
-    if metadata.get('artist') and 'originalartist' not in metadata:
-        metadata['originalartist'] = metadata['artist']
-    if metadata.get('album') and 'originalalbum' not in metadata:
-        metadata['originalalbum'] = metadata['album']
+    # Check if originaltitle is already present in original file or metadata
+    existing_orig_title = None
+    if file and hasattr(file, 'orig_metadata') and file.orig_metadata:
+        existing_orig_title = file.orig_metadata.get('originaltitle') or file.orig_metadata.get('_original_title')
+    if not existing_orig_title:
+        existing_orig_title = metadata.get('originaltitle') or metadata.get('_original_title')
+    if isinstance(existing_orig_title, list) and existing_orig_title:
+        existing_orig_title = existing_orig_title[0]
+
     _clean_internal_tags(metadata)
 
     orig_title = metadata.get('title', '')
@@ -325,17 +328,20 @@ def _apply_romanization(api, track, metadata, file=None):
 
     target_title = local_title if local_title else orig_title
 
+    jp_only = None
+
     if target_title:
         if already_has_latin_translation(target_title):
+            parts = re.split(r'\s*[\-\–\—\/]\s*', target_title)
+            for p in parts:
+                if contains_japanese(p):
+                    jp_only = p.strip()
+                    break
             if mode in ("auto", "dual"):
                 metadata['title'] = target_title
-                metadata['originaltitle'] = target_title
             elif mode == "japanese":
-                parts = re.split(r'\s*[\-\–\—\/]\s*', target_title)
-                for p in parts:
-                    if contains_japanese(p):
-                        metadata['title'] = p.strip()
-                        break
+                if jp_only:
+                    metadata['title'] = jp_only
             elif mode == "romaji":
                 lat = _get_latin_part(target_title)
                 if lat:
@@ -343,12 +349,12 @@ def _apply_romanization(api, track, metadata, file=None):
 
         elif contains_japanese(target_title):
             clean_jp = _strip_track_num_prefix(target_title)
+            jp_only = clean_jp
             if mode in ("auto", "dual"):
                 result = romanize_dict({'title': clean_jp})
                 romaji = result.get('title', clean_jp)
                 if romaji and romaji != clean_jp:
                     metadata['title'] = f"{clean_jp} - {romaji}"
-                    metadata['originaltitle'] = f"{clean_jp} - {romaji}"
                 else:
                     metadata['title'] = clean_jp
             elif mode == "japanese":
@@ -357,6 +363,14 @@ def _apply_romanization(api, track, metadata, file=None):
                 result = romanize_dict({'title': clean_jp})
                 romaji = result.get('title', clean_jp)
                 metadata['title'] = romaji
+
+    # Handle originaltitle:
+    # 1. If originaltitle ALREADY existed, PRESERVE IT EXACTLY (do NOT change/overwrite it).
+    # 2. If originaltitle was missing, set it to the pure Japanese title (jp_only), NOT dual.
+    if existing_orig_title:
+        metadata['originaltitle'] = existing_orig_title
+    elif jp_only:
+        metadata['originaltitle'] = jp_only
 
     # Artist / album – convert Japanese to Romaji
     to_convert = {}
