@@ -393,41 +393,28 @@ def _apply_romanization(api, track, metadata, file=None):
             metadata[k] = v
 
 
-def process_track(api, track, metadata, track_node, release_node):
-    _apply_romanization(api, track, metadata)
-
-
-def on_file_added_to_track(*args):
+def process_track(*args, **kwargs):
     track = None
-    file = None
-    for arg in args:
-        if hasattr(arg, "metadata") and hasattr(arg, "filename"):
-            file = arg
-        elif hasattr(arg, "album") and hasattr(arg, "files"):
-            track = arg
-
-    if file:
-        _apply_romanization(None, track, file.metadata, file=file)
-    if track and hasattr(track, "metadata"):
-        _apply_romanization(None, track, track.metadata, file=file)
+    metadata = None
+    for a in args:
+        if hasattr(a, 'album') and (hasattr(a, 'files') or hasattr(a, 'linked_files')):
+            track = a
+        elif hasattr(a, 'getall') or (isinstance(a, dict) and 'title' in a):
+            metadata = a
+    if metadata:
+        _apply_romanization(None, track, metadata)
 
 
-def process_album(tagger, metadata, release):
-    if metadata.get('title') and 'originalalbum' not in metadata:
-        metadata['originalalbum'] = metadata['title']
-    if metadata.get('albumartist') and 'originalalbumartist' not in metadata:
-        metadata['originalalbumartist'] = metadata['albumartist']
-    _clean_internal_tags(metadata)
-
-    to_convert = {}
-    for k in ('title', 'album', 'albumartist'):
-        v = metadata.get(k)
-        if v and contains_japanese(v):
-            to_convert[k] = v
-    if to_convert:
-        converted = romanize_dict(to_convert)
-        for k, v in converted.items():
-            metadata[k] = v
+def process_album(*args, **kwargs):
+    album = None
+    metadata = None
+    for a in args:
+        if hasattr(a, 'tracks') and hasattr(a, 'metadata'):
+            album = a
+        elif hasattr(a, 'getall') or (isinstance(a, dict) and 'title' in a):
+            metadata = a
+    if metadata:
+        _apply_romanization(None, album, metadata)
 
 
 class AutoRomanizerOptionsPage(OptionsPage):
