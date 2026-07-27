@@ -295,7 +295,7 @@ def _clean_internal_tags(metadata):
 
 # ── Metadata processors ───────────────────────────────────────────────────────
 
-def process_track(api, track, metadata, track_node, release_node):
+def _apply_romanization(api, track, metadata, file=None):
     cfg = api.plugin_config if (api and hasattr(api, "plugin_config")) else (api.global_config.setting if (api and hasattr(api, "global_config")) else config.setting)
     mode = cfg.get(TITLE_MODE_OPTION, DEFAULT_MODE) if hasattr(cfg, "get") else (cfg[TITLE_MODE_OPTION] if TITLE_MODE_OPTION in cfg else DEFAULT_MODE)
 
@@ -311,44 +311,38 @@ def process_track(api, track, metadata, track_node, release_node):
     if isinstance(orig_title, list) and orig_title:
         orig_title = orig_title[0]
 
-    # Find any local Japanese or Dual title from linked files or tagger
+    # Check local file for Japanese or Dual title
     local_title = None
-    linked_files = getattr(track, 'files', []) or getattr(track, 'linked_files', [])
-    for f in linked_files:
-        local_title = _extract_local_title_from_file(f)
-        if local_title:
-            break
+    if file:
+        local_title = _extract_local_title_from_file(file)
 
-    if not local_title and tagger:
-        all_files = getattr(tagger, 'files', {}) or {}
-        for fn, f in all_files.items():
+    if not local_title and track:
+        linked_files = getattr(track, 'files', []) or getattr(track, 'linked_files', [])
+        for f in linked_files:
             local_title = _extract_local_title_from_file(f)
             if local_title:
                 break
 
-    # Determine base Japanese / Dual title to work with
-    target_jp_or_dual = local_title if local_title else orig_title
+    target_title = local_title if local_title else orig_title
 
-    if target_jp_or_dual:
-        if already_has_latin_translation(target_jp_or_dual):
-            # Already dual (e.g. "カタオモイ - Kataomoi")
+    if target_title:
+        if already_has_latin_translation(target_title):
             if mode in ("auto", "dual"):
-                metadata['title'] = target_jp_or_dual
-                metadata['originaltitle'] = target_jp_or_dual
+                metadata['title'] = target_title
+                metadata['originaltitle'] = target_title
             elif mode == "japanese":
-                parts = re.split(r'\s*[\-\–\—\/]\s*', target_jp_or_dual)
+                parts = re.split(r'\s*[\-\–\—\/]\s*', target_title)
                 for p in parts:
                     if contains_japanese(p):
                         metadata['title'] = p.strip()
                         break
             elif mode == "romaji":
-                lat = _get_latin_part(target_jp_or_dual)
+                lat = _get_latin_part(target_title)
                 if lat:
                     metadata['title'] = lat
 
-        elif contains_japanese(target_jp_or_dual):
-            # Pure Japanese title (e.g. "カタオモイ")
-            clean_jp = _strip_track_num_prefix(target_jp_or_dual)
+        elif contains_japanese(target_title):
+            clean_jp = _strip_track_num_prefix(target_title)
             if mode in ("auto", "dual"):
                 result = romanize_dict({'title': clean_jp})
                 romaji = result.get('title', clean_jp)
@@ -376,6 +370,25 @@ def process_track(api, track, metadata, track_node, release_node):
         converted = romanize_dict(to_convert)
         for k, v in converted.items():
             metadata[k] = v
+
+
+def process_track(api, track, metadata, track_node, release_node):
+    _apply_romanization(api, track, metadata)
+
+
+def on_file_added_to_track(*args):
+    track = None
+    file = None
+    for arg in args:
+        if hasattr(arg, "metadata") and hasattr(arg, "filename"):
+            file = arg
+        elif hasattr(arg, "album") and hasattr(arg, "files"):
+            track = arg
+
+    if file:
+        _apply_romanization(None, track, file.metadata, file=file)
+    if track and hasattr(track, "metadata"):
+        _apply_romanization(None, track, track.metadata, file=file)
 def process_album(tagger, metadata, release):
     if metadata.get('title') and 'originalalbum' not in metadata:
         metadata['originalalbum'] = metadata['title']
@@ -455,4 +468,5 @@ def enable(api: PluginApi):
     api.register_track_metadata_processor(process_track)
     api.register_album_metadata_processor(process_album)
     api.register_file_post_load_processor(_on_file_loaded)
+    api.register_file_post_addition_to_track_processor(on_file_added_to_track)
     api.register_options_page(AutoRomanizerOptionsPage)
