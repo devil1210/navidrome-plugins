@@ -245,13 +245,29 @@ def _on_file_loaded(*args):
 
 
 
+PYTHON_PATH = r"C:\Users\charl\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe"
+
 def romanize_dict(tags_dict):
+    try:
+        from . import romanizer
+        res = {}
+        for k, v in tags_dict.items():
+            if isinstance(v, str) and contains_japanese(v):
+                rom = romanizer.to_romaji(v)
+                res[k] = rom
+            else:
+                res[k] = v
+        return res
+    except Exception as e:
+        log.debug("Auto Romanizer in-process conversion fallback: %s", e)
+
     if not os.path.exists(SCRIPT_PATH):
         return tags_dict
     try:
+        py_exec = PYTHON_PATH if os.path.exists(PYTHON_PATH) else "python"
         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         proc = subprocess.Popen(
-            [PYTHON_PATH, SCRIPT_PATH, "--json-dict", json.dumps(tags_dict)],
+            [py_exec, SCRIPT_PATH, "--json-dict", json.dumps(tags_dict)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=creationflags
         )
@@ -417,7 +433,7 @@ class AutoRomanizerOptionsPage(OptionsPage):
         vbox.addWidget(group)
         vbox.addStretch()
 
-        def _get_cfg(self):
+    def _get_cfg(self):
         if hasattr(self, 'api') and self.api and hasattr(self.api, 'plugin_config'):
             return self.api.plugin_config
         if hasattr(self, 'api') and self.api and hasattr(self.api, 'global_config'):
