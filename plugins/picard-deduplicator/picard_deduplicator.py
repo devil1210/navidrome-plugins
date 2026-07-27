@@ -1,18 +1,13 @@
 # -*- coding: utf-8 -*-
-from picard.plugin3.api import PluginApi
-
-from picard.plugin3.api import (
-    BaseAction,
-    File,
-)
-
+from picard.plugin3.api import PluginApi, BaseAction, File
 import os
 import re
 import shutil
 
-
-
 DUP_PATTERN = re.compile(r'\s*\(\d+\)$')
+
+# Module-level logger reference, set in enable()
+_log = None
 
 def get_backup_dir(dirpath):
     norm = os.path.normpath(dirpath)
@@ -45,17 +40,21 @@ def sync_lrc_files(dirpath, clean_base, dup_base):
         if not os.path.exists(clean_lrc):
             try:
                 os.rename(dup_lrc, clean_lrc)
-                api.logger.info("File Deduplicator: Renombrada letra %s.lrc -> %s.lrc", dup_base, clean_base)
+                if _log:
+                    _log.info("File Deduplicator: Renombrada letra %s.lrc -> %s.lrc", dup_base, clean_base)
             except Exception as e:
-                api.logger.error("File Deduplicator Error renombrando letra: %s", e)
+                if _log:
+                    _log.error("File Deduplicator Error renombrando letra: %s", e)
         else:
             try:
                 os.makedirs(backup_dir, exist_ok=True)
                 dst = os.path.join(backup_dir, dup_base + ".lrc")
                 shutil.move(dup_lrc, dst)
-                api.logger.info("File Deduplicator: Se movió letra duplicada %s.lrc -> %s", dup_base, dst)
+                if _log:
+                    _log.info("File Deduplicator: Se movió letra duplicada %s.lrc -> %s", dup_base, dst)
             except Exception as e:
-                api.logger.error("File Deduplicator Error moviendo letra: %s", e)
+                if _log:
+                    _log.error("File Deduplicator Error moviendo letra: %s", e)
 
 def handle_duplicate_pair(dirpath, item):
     file_base, ext = os.path.splitext(item)
@@ -79,11 +78,13 @@ def handle_duplicate_pair(dirpath, item):
     if not os.path.exists(orig_file):
         try:
             os.rename(dup_file, orig_file)
-            api.logger.info("File Deduplicator: Renombrado audio %s -> %s", item, orig_name)
+            if _log:
+                _log.info("File Deduplicator: Renombrado audio %s -> %s", item, orig_name)
             sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            api.logger.error("File Deduplicator Error: %s", e)
+            if _log:
+                _log.error("File Deduplicator Error: %s", e)
             return False
 
     # Comparar calidad
@@ -96,22 +97,26 @@ def handle_duplicate_pair(dirpath, item):
             old_backup_dst = os.path.join(backup_dir, orig_name)
             shutil.move(orig_file, old_backup_dst)
             os.rename(dup_file, orig_file)
-            api.logger.info("File Deduplicator: ¡Nuevo archivo %s tiene MEJOR calidad! Se guardó como principal y el viejo se movió a %s.", item, old_backup_dst)
+            if _log:
+                _log.info("File Deduplicator: ¡Nuevo archivo %s tiene MEJOR calidad! Se guardó como principal y el viejo se movió a %s.", item, old_backup_dst)
             sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            api.logger.error("File Deduplicator Error intercambiando mejor calidad: %s", e)
+            if _log:
+                _log.error("File Deduplicator Error intercambiando mejor calidad: %s", e)
             return False
     else:
         # Nuevo archivo es de MENOR o igual calidad
         try:
             dup_backup_dst = os.path.join(backup_dir, item)
             shutil.move(dup_file, dup_backup_dst)
-            api.logger.info("File Deduplicator: Archivo %s es de MENOR calidad. Conservando original y moviendo duplicado a %s.", item, dup_backup_dst)
+            if _log:
+                _log.info("File Deduplicator: Archivo %s es de MENOR calidad. Conservando original y moviendo duplicado a %s.", item, dup_backup_dst)
             sync_lrc_files(dirpath, clean_base, file_base)
             return True
         except Exception as e:
-            api.logger.error("File Deduplicator Error moviendo menor calidad: %s", e)
+            if _log:
+                _log.error("File Deduplicator Error moviendo menor calidad: %s", e)
             return False
 
 def process_directory_duplicates(dirpath):
@@ -128,7 +133,15 @@ def process_directory_duplicates(dirpath):
                 moved_count += 1
     return moved_count
 
-def remove_duplicate_artifacts(file):
+def remove_duplicate_artifacts(*args, **kwargs):
+    """file_post_save_processor: Picard v3 passes (api, file, ...) as positional args."""
+    file = None
+    for a in args:
+        if hasattr(a, 'filename') and hasattr(a, 'metadata'):
+            file = a
+            break
+    if file is None:
+        return
     try:
         filepath = file.filename
         if not filepath or not os.path.exists(filepath):
@@ -136,7 +149,8 @@ def remove_duplicate_artifacts(file):
         dirpath = os.path.dirname(filepath)
         process_directory_duplicates(dirpath)
     except Exception as e:
-        api.logger.error("File Deduplicator Error: %s", e)
+        if _log:
+            _log.error("File Deduplicator Error: %s", e)
 
 class MoveDuplicatesAction(BaseAction):
     NAME = 'Mover duplicados (1) a M:\\music\\_duplicados_backup'
@@ -154,11 +168,13 @@ class MoveDuplicatesAction(BaseAction):
         for d in dirs_to_scan:
             count += process_directory_duplicates(d)
 
-        self.api.logger.info("File Deduplicator: Se procesaron %d archivos duplicados.", count)
-
+        if _log:
+            _log.info("File Deduplicator: Se procesaron %d archivos duplicados.", count)
 
 def enable(api: PluginApi):
     """Called when plugin is enabled."""
+    global _log
+    _log = api.logger
     api.register_file_post_save_processor(remove_duplicate_artifacts)
     api.register_album_action(MoveDuplicatesAction)
     api.register_track_action(MoveDuplicatesAction)
