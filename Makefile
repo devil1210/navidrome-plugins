@@ -8,14 +8,14 @@ else
 endif
 
 WASM_OUT := plugin.wasm
-TELEGRAM_DIR := plugins/telegram-plugin
-LYRICS_DIR := plugins/lyrics-plugin
-METADATA_DIR := plugins/nd-metadata
-PICARD_DIR := plugins/picard-auto-romanizer
-DEDUP_DIR := plugins/picard-deduplicator
+TELEGRAM_DIR := navidrome/telegram
+LYRICS_DIR   := navidrome/lyrics
+METADATA_DIR := navidrome/nd-metadata
+PICARD_DIR   := picard/auto-romanizer
+DEDUP_DIR    := picard/deduplicator
 
 TELEGRAM_NDP := navidrome-telegram.ndp
-LYRICS_NDP := nd-lyrics.ndp
+LYRICS_NDP   := nd-lyrics.ndp
 METADATA_NDP := nd-metadata.ndp
 PICARD_ZIP := auto_romanizer.zip
 DEDUP_ZIP := picard_deduplicator.zip
@@ -78,9 +78,9 @@ deploy-metadata: package-metadata
 	scp $(METADATA_DIR)/$(METADATA_NDP) "$(DEST)/$(METADATA_NDP)"
 
 deploy: package
-	scp plugins/telegram-plugin/$(TELEGRAM_NDP) $(DEST)/$(TELEGRAM_NDP)
-	scp plugins/lyrics-plugin/$(LYRICS_NDP) $(DEST)/$(LYRICS_NDP)
-	scp plugins/nd-metadata/$(METADATA_NDP) $(DEST)/$(METADATA_NDP)
+	scp $(TELEGRAM_DIR)/$(TELEGRAM_NDP) $(DEST)/$(TELEGRAM_NDP)
+	scp $(LYRICS_DIR)/$(LYRICS_NDP) $(DEST)/$(LYRICS_NDP)
+	scp $(METADATA_DIR)/$(METADATA_NDP) $(DEST)/$(METADATA_NDP)
 	@echo "==> Deploy completo."
 
 clean:
