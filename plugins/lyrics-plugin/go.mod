@@ -2,7 +2,7 @@ module navidrome-lyrics-plugin
 
 go 1.25
 
-require github.com/navidrome/navidrome/plugins/pdk/go v0.0.0-20260720134948-c35b14dd74d3
+require github.com/navidrome/navidrome/plugins/pdk/go v0.0.0-20260730014842-4f29465d27d3
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

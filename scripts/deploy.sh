@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-DEST="${DEST:-${1:-$NAV_SERVER}}"
+DEST="${DEST:-${1:-$NAV_DEST}}"
 
 if [ -z "$DEST" ]; then
     echo "Error: Destination not specified."
@@ -10,9 +10,10 @@ if [ -z "$DEST" ]; then
 fi
 
 TELEGRAM_NDP="plugins/telegram-plugin/navidrome-telegram.ndp"
-LYRICS_NDP="plugins/lyrics-plugin/navidrome-lyrics-plugin.ndp"
+LYRICS_NDP="plugins/lyrics-plugin/nd-lyrics.ndp"
+METADATA_NDP="plugins/nd-metadata/nd-metadata.ndp"
 
-if [ ! -f "$TELEGRAM_NDP" ] && [ ! -f "$LYRICS_NDP" ]; then
+if [ ! -f "$TELEGRAM_NDP" ] && [ ! -f "$LYRICS_NDP" ] && [ ! -f "$METADATA_NDP" ]; then
     echo "Error: No .ndp packages found to deploy. Run 'make package' first."
     exit 1
 fi
@@ -27,6 +28,11 @@ fi
 if [ -f "$LYRICS_NDP" ]; then
     echo "  -> Transferring $LYRICS_NDP..."
     scp "$LYRICS_NDP" "$DEST"
+fi
+
+if [ -f "$METADATA_NDP" ]; then
+    echo "  -> Transferring $METADATA_NDP..."
+    scp "$METADATA_NDP" "$DEST"
 fi
 
 echo "Deployment complete!"

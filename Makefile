@@ -18,7 +18,6 @@ DEDUP_ZIP := picard_deduplicator.zip
 DEST ?= $(NAV_DEST)
 DEST ?= user@your-server:/path/to/plugins
 
-SHELL := /bin/bash
 
 all: package
 
@@ -32,12 +31,7 @@ build-lyrics:
 
 build-metadata:
 	@echo "==> Compiling nd-metadata plugin to WASM..."
-	@if command -v tinygo >/dev/null 2>&1; then \
-		cd $(METADATA_DIR) && tinygo build -o $(WASM_OUT) -target wasip1 -buildmode=c-shared .; \
-	else \
-		echo "Error: TinyGo is not installed or not in PATH"; \
-		exit 1; \
-	fi
+	cd $(METADATA_DIR) && tinygo build -o $(WASM_OUT) -target wasip1 -buildmode=c-shared .
 
 build-all: build-telegram build-lyrics build-metadata
 
@@ -77,7 +71,10 @@ deploy-metadata: package-metadata
 	scp $(METADATA_DIR)/$(METADATA_NDP) "$(DEST)/$(METADATA_NDP)"
 
 deploy: package
-	@bash scripts/deploy.sh $(DEST)
+	scp plugins/telegram-plugin/$(TELEGRAM_NDP) $(DEST)/$(TELEGRAM_NDP)
+	scp plugins/lyrics-plugin/$(LYRICS_NDP) $(DEST)/$(LYRICS_NDP)
+	scp plugins/nd-metadata/$(METADATA_NDP) $(DEST)/$(METADATA_NDP)
+	@echo "==> Deploy completo."
 
 clean:
 	@echo "Cleaning compiled WASM binaries, NDP packages, and Picard zips..."
