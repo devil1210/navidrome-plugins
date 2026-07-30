@@ -1,5 +1,12 @@
 .PHONY: all build-telegram build-lyrics build-metadata build-all package package-telegram package-lyrics package-metadata package-picard package-deduplicator deploy-telegram deploy-lyrics deploy-metadata deploy clean
 
+# Cross-platform file removal (one file per call)
+ifeq ($(OS),Windows_NT)
+    RM_F = powershell -Command "Remove-Item -Force -ErrorAction SilentlyContinue -Path '$(1)'"
+else
+    RM_F = rm -f $(1)
+endif
+
 WASM_OUT := plugin.wasm
 TELEGRAM_DIR := plugins/telegram-plugin
 LYRICS_DIR := plugins/lyrics-plugin
@@ -78,8 +85,12 @@ deploy: package
 
 clean:
 	@echo "Cleaning compiled WASM binaries, NDP packages, and Picard zips..."
-	rm -f $(TELEGRAM_DIR)/$(WASM_OUT) $(TELEGRAM_DIR)/$(TELEGRAM_NDP)
-	rm -f $(LYRICS_DIR)/$(WASM_OUT) $(LYRICS_DIR)/$(LYRICS_NDP)
-	rm -f $(METADATA_DIR)/$(WASM_OUT) $(METADATA_DIR)/$(METADATA_NDP)
-	rm -f $(PICARD_DIR)/$(PICARD_ZIP)
-	rm -f $(DEDUP_DIR)/$(DEDUP_ZIP)
+	$(call RM_F,$(TELEGRAM_DIR)/$(WASM_OUT))
+	$(call RM_F,$(TELEGRAM_DIR)/$(TELEGRAM_NDP))
+	$(call RM_F,$(LYRICS_DIR)/$(WASM_OUT))
+	$(call RM_F,$(LYRICS_DIR)/$(LYRICS_NDP))
+	$(call RM_F,$(METADATA_DIR)/$(WASM_OUT))
+	$(call RM_F,$(METADATA_DIR)/$(METADATA_NDP))
+	$(call RM_F,$(PICARD_DIR)/$(PICARD_ZIP))
+	$(call RM_F,$(DEDUP_DIR)/$(DEDUP_ZIP))
+
