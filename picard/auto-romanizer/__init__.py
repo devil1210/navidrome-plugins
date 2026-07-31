@@ -401,7 +401,16 @@ def _apply_romanization(api, track, metadata, file=None):
             if local_title:
                 break
 
-    target_title = local_title if local_title else orig_title
+    # For target_title selection:
+    # - For Japanese titles: prefer local_title (file on disk may already have dual JP - Romaji format)
+    # - For pure Latin titles: ALWAYS prefer orig_title from MusicBrainz, because the file on disk
+    #   may have been saved with a stripped version (e.g. 'MAIDEN' instead of 'MAIDEN (Instrumental)')
+    if local_title and contains_japanese(local_title):
+        target_title = local_title
+    elif orig_title:
+        target_title = orig_title
+    else:
+        target_title = local_title
     jp_only = None
 
     if target_title:
