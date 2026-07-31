@@ -64,36 +64,99 @@ def _normalize_for_comparison(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', str(s).lower())
 
 
+_PAREN_TRAILER = re.compile(r'^(.*?)\s*(\s*\([^)]*\)\s*)$', re.DOTALL)
+
 def safe_to_romaji(text: str) -> str:
+    """Convert Japanese text to romaji, preserving parenthetical qualifiers verbatim."""
     if not text or not contains_japanese(text):
         return text
     try:
         import pykakasi
         kks = pykakasi.kakasi()
-        conv = kks.convert(str(text))
+
+        # Step 1: Extract trailing parenthetical (e.g. ' (Instrumental)', ' (TV size ver.)')
+        # and pass only the core JP text to pykakasi.
+        m = _PAREN_TRAILER.match(str(text))
+        if m and contains_japanese(m.group(1)):
+            core = m.group(1).strip()
+            trailer = m.group(2).rstrip()   # preserve original case/formatting
+        else:
+            core = str(text)
+            trailer = ''
+
+        conv = kks.convert(core)
         if not conv:
             return str(text)
+
+        PARTICLES = ('no', 'ga', 'to', 'ni', 'wa', 'o', 'e', 'de', 'mo', 'ka', 'ya', 'na', 'ne', 'wo')
+
+        # Step 2: Re-assemble abbreviations like "E.P." that pykakasi splits into tokens
+        reassembled = []
+        i = 0
+        while i < len(conv):
+            item = conv[i]
+            orig = item.get('orig', '')
+            # Detect: single ASCII letter
+            if len(orig) == 1 and orig.isalpha() and orig.isascii():
+                abbr = orig
+                j = i + 1
+                while j < len(conv):
+                    nxt_orig = conv[j].get('orig', '')
+                    if nxt_orig == '.':
+                        abbr += '.'
+                        j += 1
+                        # Absorb next single letter after dot
+                        if j < len(conv):
+                            after = conv[j].get('orig', '')
+                            if len(after) == 1 and after.isalpha() and after.isascii():
+                                abbr += after
+                                j += 1
+                    else:
+                        break
+                if '.' in abbr:
+                    # Keep original case — don't lowercase abbreviations
+                    reassembled.append({'orig': abbr, 'hepburn': abbr})
+                    i = j
+                    continue
+            reassembled.append(item)
+            i += 1
+
+        # Step 3: Build romaji word list
         words = []
-        for item in conv:
+        for item in reassembled:
             orig = item.get('orig', '')
             h = item.get('hepburn', '').strip()
             if not h:
                 if orig:
                     words.append(orig)
                 continue
-            if orig == '・':
-                words.append('・')
-            elif h.lower() in ('no', 'ga', 'to', 'ni', 'wa', 'o', 'e', 'de', 'mo', 'ka', 'ya', 'na', 'ne', 'wo'):
+            if orig == '\u30fb':  # ・ middle dot
+                words.append('\u30fb')
+            elif h.lower() in PARTICLES:
                 words.append(h.lower())
             else:
                 words.append(h.capitalize())
+
         res = ' '.join(words).strip()
-        res = re.sub(r'\s*([・\-\–\—\(\)])\s*', r'\1', res)
-        res = re.sub(r'\)\s*([a-zA-Z])', r') \1', res)
+
+        # Step 4: Fix particles merged into preceding word by pykakasi
+        # e.g. "Watashino" -> "Watashi no",  "Sorewa" -> "Sore wa"
+        _particle_re = re.compile(r'([A-Z][a-z]{1,})(no|ga|ni|to|wa|de|mo|ka|ya|ne)\b', re.IGNORECASE)
+        res = _particle_re.sub(r'\1 \2', res)
+
+        # Step 5: Clean up spacing around dashes
+        res = re.sub(r'\s*([\-\u2013\u2014])\s*', r'\1', res)
+        res = re.sub(r' {2,}', ' ', res).strip()
+
+        # Step 6: Re-attach the original trailer (preserves case and punctuation)
+        if trailer:
+            res = res + trailer
+
         return res if res else str(text)
     except Exception as e:
         log.error("Auto Romanizer safe_to_romaji error for %r: %s", text, e)
         return str(text)
+
 
 
 def romanize_dict(tags_dict: dict) -> dict:
@@ -154,10 +217,15 @@ def _is_corresponding_translation(lat: str, jp: str) -> bool:
 
 
 def already_has_latin_translation(text: str) -> bool:
-    """Check if text already has a verified corresponding Latin/English translation or Romaji attached."""
+    """Check if text already has a verified corresponding Latin/English translation or Romaji attached.
+    Only splits on dashes (–, —, -), NEVER on parentheses.
+    Parenthetical content like '(Instrumental)', '(TV size ver.)' are metadata qualifiers,
+    not translations — romanization should still be applied to the core Japanese title.
+    """
     if not text or not contains_japanese(text):
         return False
-    parts = re.split(r'\s*[\-\–\—\/\(\)]\s*', str(text))
+    # Only split on dash separators, not parentheses
+    parts = re.split(r'\s+[\-\u2013\u2014]\s+', str(text))
     if len(parts) < 2:
         return False
     jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
@@ -165,9 +233,12 @@ def already_has_latin_translation(text: str) -> bool:
     if jp_parts and lat_parts:
         for jp in jp_parts:
             for lat in lat_parts:
-                if _is_corresponding_translation(lat, jp):
+                # Strip any trailing parenthetical before checking
+                lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
+                if lat_clean and _is_corresponding_translation(lat_clean, jp):
                     return True
     return False
+
 
 
 def has_dual_structure(text: str) -> bool:
@@ -353,11 +424,23 @@ def _apply_romanization(api, track, metadata, file=None):
             else:
                 clean_jp = _strip_track_num_prefix(target_title)
                 jp_only = clean_jp
+
+                # Extract parenthetical suffix like ' (Instrumental)', ' (TV size ver.)' etc.
+                # so we romanize only the core Japanese title and reattach the qualifier.
+                _paren_trailer_re = re.compile(r'^(.*?)\s*(\([^)]*\)\s*)$', re.DOTALL)
+                _pm = _paren_trailer_re.match(clean_jp)
+                if _pm and contains_japanese(_pm.group(1)):
+                    jp_core = _pm.group(1).strip()
+                    jp_suffix = ' ' + _pm.group(2).strip()
+                else:
+                    jp_core = clean_jp
+                    jp_suffix = ''
+
                 if mode in ("auto", "dual"):
                     try:
-                        romaji = safe_to_romaji(clean_jp)
-                        log.info(f"[Auto Romanizer] safe_to_romaji('{clean_jp}') produced: '{romaji}'")
-                        if romaji and romaji != clean_jp:
+                        romaji = safe_to_romaji(jp_core)
+                        log.info(f"[Auto Romanizer] safe_to_romaji('{jp_core}') produced: '{romaji}'")
+                        if romaji and romaji != jp_core:
                             new_t = f"{clean_jp} - {romaji}"
                             metadata['title'] = new_t
                             log.info(f"[Auto Romanizer] Converted: '{orig_title}' -> '{new_t}'")
