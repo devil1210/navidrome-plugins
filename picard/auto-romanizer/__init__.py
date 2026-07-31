@@ -450,7 +450,7 @@ def _apply_romanization(api, track, metadata, file=None):
                         romaji = safe_to_romaji(jp_core)
                         log.info(f"[Auto Romanizer] safe_to_romaji('{jp_core}') produced: '{romaji}'")
                         if romaji and romaji != jp_core:
-                            new_t = f"{clean_jp} - {romaji}"
+                            new_t = f"{clean_jp} - {romaji}{jp_suffix}"
                             metadata['title'] = new_t
                             log.info(f"[Auto Romanizer] Converted: '{orig_title}' -> '{new_t}'")
                         else:
