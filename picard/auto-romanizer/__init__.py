@@ -49,6 +49,88 @@ LATIN_META_WORDS = {
     'remastered', 'piano', 'strings', 'orchestral', 'arrange', 'arranged', 'inst'
 }
 
+# Katakana → English loanword mapping.
+# Sorted longest-first at build time so longer matches take priority (e.g.
+# サウンドトラック before トラック). Applied BEFORE pykakasi so these well-known
+# English loanwords are emitted as proper English, not phonetic romaji.
+_KATAKANA_TO_ENGLISH: list[tuple[str, str]] = sorted([
+    ('オリジナル・サウンドトラック', 'Original Soundtrack'),
+    ('サウンドトラック', 'Soundtrack'),
+    ('オリジナルサウンドトラック', 'Original Soundtrack'),
+    ('オリジナル', 'Original'),
+    ('アニメーション', 'Animation'),
+    ('アニメ', 'Anime'),
+    ('テーマソング', 'Theme Song'),
+    ('テーマ', 'Theme'),
+    ('ベストアルバム', 'Best Album'),
+    ('コレクション', 'Collection'),
+    ('スペシャル', 'Special'),
+    ('エディション', 'Edition'),
+    ('バージョン', 'Version'),
+    ('ボーカル', 'Vocal'),
+    ('ボーカルズ', 'Vocals'),
+    ('インストゥルメンタル', 'Instrumental'),
+    ('インスト', 'Inst.'),
+    ('アルバム', 'Album'),
+    ('シングル', 'Single'),
+    ('リミックス', 'Remix'),
+    ('アコースティック', 'Acoustic'),
+    ('ライブ', 'Live'),
+    ('デラックス', 'Deluxe'),
+    ('コンプリート', 'Complete'),
+    ('ミュージック', 'Music'),
+    ('ボーナス', 'Bonus'),
+    ('イントロ', 'Intro'),
+    ('アウトロ', 'Outro'),
+    ('スコア', 'Score'),
+    ('コンピレーション', 'Compilation'),
+    ('オーケストラ', 'Orchestra'),
+    ('ストリングス', 'Strings'),
+    ('ドラマ', 'Drama'),
+    ('ゲーム', 'Game'),
+    ('シアター', 'Theater'),
+    ('シネマ', 'Cinema'),
+    ('ビデオ', 'Video'),
+    ('ラジオ', 'Radio'),
+    ('デジタル', 'Digital'),
+    ('ステレオ', 'Stereo'),
+    ('リマスタード', 'Remastered'),
+    ('リマスター', 'Remaster'),
+    ('オープニング', 'Opening'),
+    ('エンディング', 'Ending'),
+    ('キャラクター', 'Character'),
+    ('プレミアム', 'Premium'),
+    ('コンピューター', 'Computer'),
+    ('カップリング', 'Coupling'),
+    ('ファンタジー', 'Fantasy'),
+    ('ミステリー', 'Mystery'),
+    ('ロマンス', 'Romance'),
+    ('アクション', 'Action'),
+    ('アドベンチャー', 'Adventure'),
+    ('コメディ', 'Comedy'),
+    ('ホラー', 'Horror'),
+    ('スリラー', 'Thriller'),
+    ('エレクトリック', 'Electric'),
+    ('ソロ', 'Solo'),
+    ('ミックス', 'Mix'),
+    ('ベスト', 'Best'),
+    ('ピアノ', 'Piano'),
+    ('ギター', 'Guitar'),
+    ('バンド', 'Band'),
+    ('ストーリー', 'Story'),
+    ('カバー', 'Cover'),
+], key=lambda x: len(x[0]), reverse=True)
+
+
+def _apply_katakana_loanwords(text: str) -> str:
+    """Replace known katakana loanwords with their English equivalents.
+    Longest entries are matched first to avoid partial replacements.
+    Spaces are added around replacements to keep pykakasi tokens separate.
+    """
+    for katakana, english in _KATAKANA_TO_ENGLISH:
+        text = text.replace(katakana, f' {english} ')
+    return re.sub(r' {2,}', ' ', text).strip()
+
 
 def contains_japanese(text: str) -> bool:
     if not text:
@@ -84,13 +166,22 @@ def safe_to_romaji(text: str) -> str:
             core = str(text)
             trailer = ''
 
+        # Step 2a: Convert Japanese quotation brackets to ASCII quotes
+        # e.g. 『正反対な君と僕』 -> "正反対な君と僕" (content still romanized by pykakasi)
+        core = re.sub(r'\u300e([^\u300f]*)\u300f', r'"\1"', core)  # 『 』
+        core = re.sub(r'\u300c([^\u300d]*)\u300d', r"'\1'", core)  # 「 」
+
+        # Step 2b: Replace known katakana loanwords with English BEFORE pykakasi
+        # so they appear as proper English (Original, Soundtrack) not phonetic romaji
+        core = _apply_katakana_loanwords(core)
+
         conv = kks.convert(core)
         if not conv:
             return str(text)
 
         PARTICLES = ('no', 'ga', 'to', 'ni', 'wa', 'o', 'e', 'de', 'mo', 'ka', 'ya', 'na', 'ne', 'wo')
 
-        # Step 2: Re-assemble abbreviations like "E.P." that pykakasi splits into tokens
+        # Step 3: Re-assemble abbreviations like "E.P." that pykakasi splits into tokens
         reassembled = []
         i = 0
         while i < len(conv):
@@ -114,14 +205,13 @@ def safe_to_romaji(text: str) -> str:
                     else:
                         break
                 if '.' in abbr:
-                    # Keep original case — don't lowercase abbreviations
                     reassembled.append({'orig': abbr, 'hepburn': abbr})
                     i = j
                     continue
             reassembled.append(item)
             i += 1
 
-        # Step 3: Build romaji word list
+        # Step 4: Build romaji word list
         words = []
         for item in reassembled:
             orig = item.get('orig', '')
@@ -130,25 +220,59 @@ def safe_to_romaji(text: str) -> str:
                 if orig:
                     words.append(orig)
                 continue
-            if orig == '\u30fb':  # ・ middle dot
-                words.append('\u30fb')
+            if orig == '\u30fb':  # ・ middle dot → omit (words already separated by spaces)
+                words.append('')
+            elif orig and orig.isascii():
+                # Token is pure ASCII (our injected loanwords, brackets, TV, BGM, etc.).
+                # Preserve original casing exactly — do NOT capitalize/lowercase.
+                # But split into sub-words and capitalize each word if it's all-lowercase
+                # (e.g. pykakasi returning 'anime' from an ASCII segment we injected).
+                if orig.islower():
+                    words.append(orig.title())
+                else:
+                    words.append(orig)
             elif h.lower() in PARTICLES:
                 words.append(h.lower())
             else:
+                # Japanese-origin token: capitalize the romaji output
                 words.append(h.capitalize())
 
-        res = ' '.join(words).strip()
+        # Filter out empty strings (from ・) but keep words joined nicely
+        res = ' '.join(w for w in words if w).strip()
 
-        # Step 4: Fix particles merged into preceding word by pykakasi
+        # Step 5: Fix particles merged into preceding word by pykakasi
         # e.g. "Watashino" -> "Watashi no",  "Sorewa" -> "Sore wa"
-        _particle_re = re.compile(r'([A-Z][a-z]{1,})(no|ga|ni|to|wa|de|mo|ka|ya|ne)\b', re.IGNORECASE)
+        _particle_re = re.compile(r'([A-Z][a-z]{1,})(no|ga|ni|to|wa|de|mo|ka|ya|ne)\b')
         res = _particle_re.sub(r'\1 \2', res)
 
-        # Step 5: Clean up spacing around dashes
-        res = re.sub(r'\s*([\-\u2013\u2014])\s*', r'\1', res)
+        # Step 6: Normalize spacing. Loanword injection adds extra spaces; pykakasi
+        # groups ASCII chunks so quote chars end up at token boundaries.
+        # Use parity: 1st, 3rd… quote = opening (space before, none after);
+        #             2nd, 4th… quote = closing (none before, space after).
+        res = re.sub(r'\s*([\u2013\u2014\-])\s*', r'\1', res)  # no space around dashes
+
+        def _fix_quotes(s: str) -> str:
+            parts = s.split('"')
+            if len(parts) <= 1:
+                return s
+            result = [parts[0].rstrip()]
+            for i, part in enumerate(parts[1:], start=1):
+                if i % 2 == 1:  # opening quote: space before, none after
+                    result.append(' "')
+                    result.append(part.lstrip())
+                else:           # closing quote: rstrip before, space after
+                    result[-1] = result[-1].rstrip()   # trim space before closing "
+                    result.append('"')
+                    stripped = part.lstrip()
+                    result.append((' ' + stripped) if stripped else stripped)
+            return ''.join(result)
+
+        res = _fix_quotes(res)
         res = re.sub(r' {2,}', ' ', res).strip()
 
-        # Step 6: Re-attach the original trailer (preserves case and punctuation)
+
+
+        # Step 7: Re-attach the original trailer (preserves case and punctuation)
         if trailer:
             res = res + trailer
 
@@ -218,25 +342,44 @@ def _is_corresponding_translation(lat: str, jp: str) -> bool:
 
 def already_has_latin_translation(text: str) -> bool:
     """Check if text already has a verified corresponding Latin/English translation or Romaji attached.
-    Only splits on dashes (–, —, -), NEVER on parentheses.
-    Parenthetical content like '(Instrumental)', '(TV size ver.)' are metadata qualifiers,
-    not translations — romanization should still be applied to the core Japanese title.
+
+    Recognizes two patterns:
+    1. Dash-separated dual title:  '日本語タイトル - Romaji Title'
+    2. Parenthetical English title: '日本語タイトル (English Title With Multiple Words)'
+       — as provided by MusicBrainz for releases like:
+         'TVアニメ...サウンドトラック (You and I Are Polar Opposites (Original Soundtrack))'
+
+    Parenthetical content is only treated as a translation if it contains
+    at least 2 meaningful non-metadata Latin words (to avoid false positives
+    for qualifiers like '(Instrumental)' or '(TV size ver.)').
     """
     if not text or not contains_japanese(text):
         return False
-    # Only split on dash separators, not parentheses
+
+    # Pattern 1: Dash-separated structure: 'JP - Romaji'
     parts = re.split(r'\s+[\-\u2013\u2014]\s+', str(text))
-    if len(parts) < 2:
-        return False
-    jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
-    lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and any(c.isalpha() for c in p)]
-    if jp_parts and lat_parts:
-        for jp in jp_parts:
-            for lat in lat_parts:
-                # Strip any trailing parenthetical before checking
-                lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
-                if lat_clean and _is_corresponding_translation(lat_clean, jp):
-                    return True
+    if len(parts) >= 2:
+        jp_parts = [p.strip() for p in parts if contains_japanese(p.strip())]
+        lat_parts = [p.strip() for p in parts if not contains_japanese(p.strip()) and any(c.isalpha() for c in p)]
+        if jp_parts and lat_parts:
+            for jp in jp_parts:
+                for lat in lat_parts:
+                    lat_clean = re.sub(r'\s*\([^)]*\)\s*$', '', lat).strip()
+                    if lat_clean and _is_corresponding_translation(lat_clean, jp):
+                        return True
+
+    # Pattern 2: Parenthetical English translation: 'JP (English title from MB)'
+    # Regex captures everything up to the LAST closing paren at end of string.
+    paren_m = re.search(r'\((.+)\)\s*$', str(text))
+    if paren_m:
+        paren_content = paren_m.group(1)
+        if not contains_japanese(paren_content):
+            # Must have >=2 non-metadata Latin words (3+ chars) to be a real translation
+            meaningful = [w for w in re.findall(r'[a-zA-Z]{3,}', paren_content)
+                          if w.lower() not in LATIN_META_WORDS]
+            if len(meaningful) >= 2:
+                return True
+
     return False
 
 
