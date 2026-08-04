@@ -211,7 +211,36 @@ def safe_to_romaji(text: str) -> str:
             reassembled.append(item)
             i += 1
 
-        # Step 4: Build romaji word list
+        # Step 3.5: Contextual reading corrections.
+        # Some kanji have multiple valid readings; pykakasi may choose the wrong one.
+        #
+        # 君 (U+541B):
+        #   - 'kimi' = 2nd-person pronoun ("you"), used standalone or before particles
+        #   - 'kun'  = honorific suffix after a name (田中君 = Tanaka-kun)
+        # Rule: if 君 → 'kun' and the NEXT token is a grammatical particle, flip to 'kimi'.
+        #
+        # 僕 (U+50D5): pykakasi usually gives 'boku' correctly, no fix needed.
+        PARTICLE_SET = frozenset(PARTICLES)
+        for idx in range(len(reassembled)):
+            item = reassembled[idx]
+            if item.get('orig') == '\u541b' and item.get('hepburn', '').lower() == 'kun':
+                # Look at the next non-empty token
+                for nxt in reassembled[idx + 1:]:
+                    nxt_h = nxt.get('hepburn', '').strip().lower()
+                    if not nxt_h:
+                        continue
+                    # Case A: next token IS a particle
+                    # Case B: next token STARTS with a particle (e.g. pykakasi merged 'kun' + 'no' → token 'kunno...' from 君のこと)
+                    #         We detect this by checking the leading 3 chars of the hepburn
+                    is_particle = nxt_h in PARTICLE_SET
+                    starts_with_particle = any(nxt_h.startswith(p) for p in ('no', 'ga', 'to', 'ni', 'wa', 'mo', 'wo', 'de', 'e'))
+                    if is_particle or starts_with_particle:
+                        # Followed by (or merged with) particle → pronoun reading → kimi
+                        reassembled[idx] = dict(item, hepburn='kimi')
+                    # Otherwise keep 'kun' (honorific suffix usage)
+                    break
+
+
         words = []
         for item in reassembled:
             orig = item.get('orig', '')
