@@ -167,9 +167,9 @@ def safe_to_romaji(text: str) -> str:
             trailer = ''
 
         # Step 2a: Convert Japanese quotation brackets to ASCII quotes
-        # e.g. 『正反対な君と僕』 -> "正反対な君と僕" (content still romanized by pykakasi)
+        # e.g. 『正反対な君と僕』 or 「僕の心のヤバイやつ」 -> "..." (content romanized by pykakasi)
         core = re.sub(r'\u300e([^\u300f]*)\u300f', r'"\1"', core)  # 『 』
-        core = re.sub(r'\u300c([^\u300d]*)\u300d', r"'\1'", core)  # 「 」
+        core = re.sub(r'\u300c([^\u300d]*)\u300d', r'"\1"', core)  # 「 」
 
         # Step 2b: Replace known katakana loanwords with English BEFORE pykakasi
         # so they appear as proper English (Original, Soundtrack) not phonetic romaji
@@ -280,24 +280,26 @@ def safe_to_romaji(text: str) -> str:
         #             2nd, 4th… quote = closing (none before, space after).
         res = re.sub(r'\s*([\u2013\u2014\-])\s*', r'\1', res)  # no space around dashes
 
-        def _fix_quotes(s: str) -> str:
-            parts = s.split('"')
+        def _fix_quotes(s: str, qchar: str = '"') -> str:
+            parts = s.split(qchar)
             if len(parts) <= 1:
                 return s
             result = [parts[0].rstrip()]
             for i, part in enumerate(parts[1:], start=1):
                 if i % 2 == 1:  # opening quote: space before, none after
-                    result.append(' "')
+                    result.append(f' {qchar}')
                     result.append(part.lstrip())
                 else:           # closing quote: rstrip before, space after
-                    result[-1] = result[-1].rstrip()   # trim space before closing "
-                    result.append('"')
+                    result[-1] = result[-1].rstrip()   # trim space before closing quote
+                    result.append(qchar)
                     stripped = part.lstrip()
                     result.append((' ' + stripped) if stripped else stripped)
             return ''.join(result)
 
-        res = _fix_quotes(res)
+        res = _fix_quotes(res, '"')
+        res = _fix_quotes(res, "'")
         res = re.sub(r' {2,}', ' ', res).strip()
+
 
 
 
