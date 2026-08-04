@@ -260,6 +260,8 @@ def safe_to_romaji(text: str) -> str:
                     words.append(orig.title())
                 else:
                     words.append(orig)
+            elif h.lower() == 'ha' and (orig == '\u306f' or orig == 'は'):
+                words.append('wa')
             elif h.lower() in PARTICLES:
                 words.append(h.lower())
             else:
@@ -270,15 +272,20 @@ def safe_to_romaji(text: str) -> str:
         res = ' '.join(w for w in words if w).strip()
 
         # Step 5: Fix particles merged into preceding word by pykakasi
-        # e.g. "Watashino" -> "Watashi no",  "Sorewa" -> "Sore wa"
-        _particle_re = re.compile(r'([A-Z][a-z]{1,})(no|ga|ni|to|wa|de|mo|ka|ya|ne)\b')
-        res = _particle_re.sub(r'\1 \2', res)
+        # e.g. "Watashino" -> "Watashi no",  "Bokuha" -> "Boku wa"
+        _particle_re = re.compile(r'([A-Z][a-z]{1,})(no|ga|ni|to|wa|de|mo|ka|ya|ne|ha)\b')
+        def _sub_particle(match):
+            word, p = match.group(1), match.group(2)
+            if p == 'ha':
+                p = 'wa'
+            return f"{word} {p}"
+        res = _particle_re.sub(_sub_particle, res)
+        res = re.sub(r'\bHa\b', 'wa', res)
 
         # Step 6: Normalize spacing. Loanword injection adds extra spaces; pykakasi
         # groups ASCII chunks so quote chars end up at token boundaries.
-        # Use parity: 1st, 3rd… quote = opening (space before, none after);
-        #             2nd, 4th… quote = closing (none before, space after).
         res = re.sub(r'\s*([\u2013\u2014\-])\s*', r'\1', res)  # no space around dashes
+        res = re.sub(r'\.\s*\.\s*\.', '...', res)              # fix dots: . . . -> ...
 
         def _fix_quotes(s: str, qchar: str = '"') -> str:
             parts = s.split(qchar)
@@ -299,6 +306,7 @@ def safe_to_romaji(text: str) -> str:
         res = _fix_quotes(res, '"')
         res = _fix_quotes(res, "'")
         res = re.sub(r' {2,}', ' ', res).strip()
+
 
 
 
@@ -651,6 +659,10 @@ def _apply_romanization(api, track, metadata, file=None):
     if isinstance(orig_album, list) and orig_album:
         orig_album = orig_album[0]
 
+    orig_album_tag = metadata.get('originalalbum', '')
+    if isinstance(orig_album_tag, list) and orig_album_tag:
+        orig_album_tag = orig_album_tag[0]
+
     local_album = None
     if file and hasattr(file, 'orig_metadata') and file.orig_metadata:
         file_alb = file.orig_metadata.get('album')
@@ -660,52 +672,59 @@ def _apply_romanization(api, track, metadata, file=None):
             if file_alb:
                 local_album = _strip_track_num_prefix(str(file_alb))
 
-    if orig_album and not contains_japanese(orig_album):
-        if local_album and (has_dual_structure(local_album) or already_has_latin_translation(local_album)):
-            target_album = local_album
+    # Check if orig_album already has official English translation from MB (e.g. parenthetical English title)
+    if orig_album and already_has_latin_translation(orig_album):
+        if not re.search(r'orijinaru|saundotorakku', orig_album, re.IGNORECASE):
+            if mode in ("auto", "dual"):
+                metadata['album'] = _normalize_parentheses_title(orig_album)
+            elif mode == "japanese":
+                lat_parts = re.split(r'\s*[\-\–\—\/]\s*|\s*\([^)]*\)\s*$', orig_album)
+                jp_p = [p.strip() for p in lat_parts if contains_japanese(p)]
+                if jp_p:
+                    metadata['album'] = jp_p[0]
+            elif mode == "romaji":
+                lat = _get_latin_part(orig_album)
+                if lat:
+                    metadata['album'] = lat
+            jp_base_album = None
         else:
-            target_album = orig_album
+            jp_base_album = None
     else:
-        target_album = local_album if (local_album and (has_dual_structure(local_album) or already_has_latin_translation(local_album))) else orig_album
+        jp_base_album = None
 
-    if target_album:
-        if 'originalalbum' not in metadata:
-            if contains_japanese(target_album):
-                if already_has_latin_translation(target_album):
-                    parts = re.split(r'\s*[\-\–\—]\s*', target_album)
-                    for p in parts:
-                        if contains_japanese(p):
-                            metadata['originalalbum'] = p.strip()
-                            break
-                else:
-                    metadata['originalalbum'] = target_album
-            else:
-                metadata['originalalbum'] = target_album
-
-        if contains_japanese(target_album):
-            if already_has_latin_translation(target_album):
-                if mode in ("auto", "dual"):
-                    metadata['album'] = _normalize_parentheses_title(target_album)
-                elif mode == "japanese":
-                    metadata['album'] = metadata.get('originalalbum', target_album)
-                elif mode == "romaji":
-                    lat = _get_latin_part(target_album)
-                    if lat:
-                        metadata['album'] = lat
-            else:
-                clean_jp_alb = _strip_track_num_prefix(target_album)
-                rom_alb = safe_to_romaji(clean_jp_alb)
-                if mode in ("auto", "dual"):
-                    if rom_alb and rom_alb != clean_jp_alb:
-                        metadata['album'] = _normalize_parentheses_title(f"{clean_jp_alb} - {rom_alb}")
-                    else:
-                        metadata['album'] = clean_jp_alb
-                elif mode == "japanese":
-                    metadata['album'] = clean_jp_alb
-                elif mode == "romaji":
-                    metadata['album'] = rom_alb if rom_alb else clean_jp_alb
+    if 'metadata' in locals() and 'album' not in metadata or (orig_album and not already_has_latin_translation(orig_album)) or (local_album and re.search(r'orijinaru|saundotorakku', local_album, re.IGNORECASE)):
+        # Find pure Japanese base title from originalalbum tag, MB orig_album, or local_album
+        if orig_album_tag and contains_japanese(orig_album_tag) and not already_has_latin_translation(orig_album_tag):
+            jp_base_album = orig_album_tag
+        elif orig_album and contains_japanese(orig_album) and not already_has_latin_translation(orig_album):
+            jp_base_album = orig_album
         else:
+            cand = orig_album if (orig_album and contains_japanese(orig_album)) else (local_album if local_album else orig_album_tag)
+            if cand and contains_japanese(cand):
+                parts = re.split(r'\s*[\-\–\—\/]\s*', cand)
+                jp_p = [p.strip() for p in parts if contains_japanese(p)]
+                if jp_p:
+                    jp_base_album = jp_p[0]
+
+    if jp_base_album:
+        clean_jp_alb = _strip_track_num_prefix(jp_base_album)
+        metadata['originalalbum'] = clean_jp_alb
+        rom_alb = safe_to_romaji(clean_jp_alb)
+        if mode in ("auto", "dual"):
+            if rom_alb and rom_alb != clean_jp_alb:
+                metadata['album'] = _normalize_parentheses_title(f"{clean_jp_alb} - {rom_alb}")
+            else:
+                metadata['album'] = clean_jp_alb
+        elif mode == "japanese":
+            metadata['album'] = clean_jp_alb
+        elif mode == "romaji":
+            metadata['album'] = rom_alb if rom_alb else clean_jp_alb
+    elif not metadata.get('album'):
+        target_album = local_album if local_album else orig_album
+        if target_album:
             metadata['album'] = _normalize_parentheses_title(_deduplicate_latin_dual(target_album))
+
+
 
     to_convert = {}
     for k in ('artist', 'albumartist'):
