@@ -25,8 +25,10 @@ func init() {
 		tagExtractor: tags.NewTagExtractor(),
 		providers: []providers.Provider{
 			&providers.LRCLIBProvider{},
+			&providers.NetEaseProvider{},
 			&providers.LyricsOVHProvider{},
 		},
+
 	}
 	lifecycle.Register(p)
 	lyrics.Register(p)

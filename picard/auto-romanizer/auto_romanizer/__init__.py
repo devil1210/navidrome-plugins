@@ -191,7 +191,9 @@ def _strip_track_num_prefix(text):
 def _normalize_parentheses_title(title_text: str) -> str:
     if not title_text:
         return title_text
-    parts = [p.strip() for p in re.split(r'\s+[\-\–\—]\s+|\s*[\-\–\—]\s*', str(title_text)) if p.strip()]
+    # Repair previously corrupted nested parentheses e.g. '(LEO (NiNE ver.))' -> '(LEO-NiNE ver.)'
+    title_text = re.sub(r'\(([^()]+)\s*\(([^()]+)\)\)', r'(\1-\2)', str(title_text))
+    parts = [p.strip() for p in re.split(r'\s+[\-\–\—]\s+', str(title_text)) if p.strip()]
     if len(parts) >= 2:
         new_parts = []
         i = 0
@@ -209,6 +211,8 @@ def _normalize_parentheses_title(title_text: str) -> str:
             i += 1
         return " - ".join(new_parts)
     return str(title_text)
+
+
 
 
 def _deduplicate_latin_dual(title_text: str) -> str:

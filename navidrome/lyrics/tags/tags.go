@@ -156,11 +156,12 @@ func ExtractTitleCandidates(title string) []string {
 		add(part2)
 	}
 
-	// Titles with parentheses like "Carry On (Album ver.)" or "サムライハート (Some Like It Hot)"
-	if idx := strings.IndexAny(title, "(（"); idx > 0 {
+	// Titles with parentheses or brackets like "Carry On (Album ver.)" or "Song [Remastered 2020]"
+	if idx := strings.IndexAny(title, "(（["); idx > 0 {
 		cleaned := title[:idx]
 		add(cleaned)
 	}
 
 	return candidates
 }
+

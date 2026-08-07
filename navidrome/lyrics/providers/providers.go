@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
@@ -36,10 +37,18 @@ func (p *LRCLIBProvider) Name() string {
 	return "lrclib"
 }
 
-// CleanLyricsText removes ^translation annotations common in LRCLIB synced lyrics.
+var wordSyncRegex = regexp.MustCompile(`<[0-9]{2}:[0-9]{2}\.[0-9]{2,3}>`)
+
+// CleanLyricsText removes ^translation annotations and <mm:ss.xxx> word-sync tags common in LRCLIB / TTML synced lyrics.
 func CleanLyricsText(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "<") {
+		raw = wordSyncRegex.ReplaceAllString(raw, "")
+	}
 	if !strings.Contains(raw, "^") {
-		return raw
+		return strings.TrimSpace(raw)
 	}
 	lines := strings.Split(raw, "\n")
 	cleanedLines := make([]string, 0, len(lines))
@@ -53,6 +62,7 @@ func CleanLyricsText(raw string) string {
 
 	return strings.Join(cleanedLines, "\n")
 }
+
 
 func (p *LRCLIBProvider) queryLRCLIB(title, artist, album string, duration int) (*LyricsResult, error) {
 	apiURL := fmt.Sprintf("https://lrclib.net/api/get?track_name=%s&artist_name=%s",
@@ -262,3 +272,84 @@ func (p *LyricsOVHProvider) FetchLyrics(title, artist, album string, duration in
 
 	return nil, fmt.Errorf("no lyrics found on lyrics.ovh")
 }
+
+// NetEaseProvider fetches synced .lrc lyrics from NetEase Cloud Music API.
+type NetEaseProvider struct{}
+
+func (p *NetEaseProvider) Name() string {
+	return "netease"
+}
+
+type neteaseSearchResponse struct {
+	Result struct {
+		Songs []struct {
+			ID int64 `json:"id"`
+		} `json:"songs"`
+	} `json:"result"`
+}
+
+type neteaseLyricResponse struct {
+	Lrc struct {
+		Lyric string `json:"lyric"`
+	} `json:"lrc"`
+}
+
+func (p *NetEaseProvider) queryNetEase(title, artist string) (*LyricsResult, error) {
+	searchURL := fmt.Sprintf("https://music.163.com/api/search/get/web?s=%s&type=1&offset=0&limit=1",
+		url.QueryEscape(title+" "+artist),
+	)
+
+	resp, err := host.HTTPSend(host.HTTPRequest{
+		Method: "GET",
+		URL:    searchURL,
+	})
+	if err != nil || resp.StatusCode != 200 {
+		return nil, fmt.Errorf("netease search error")
+	}
+
+	var searchRes neteaseSearchResponse
+	if err := json.Unmarshal(resp.Body, &searchRes); err != nil || len(searchRes.Result.Songs) == 0 {
+		return nil, fmt.Errorf("netease song not found")
+	}
+
+	songID := searchRes.Result.Songs[0].ID
+	lyricURL := fmt.Sprintf("https://music.163.com/api/song/lyric?id=%d&lv=-1&kv=-1&tv=-1", songID)
+
+	lyricResp, err := host.HTTPSend(host.HTTPRequest{
+		Method: "GET",
+		URL:    lyricURL,
+	})
+	if err != nil || lyricResp.StatusCode != 200 {
+		return nil, fmt.Errorf("netease lyric fetch error")
+	}
+
+	var lyricRes neteaseLyricResponse
+	if err := json.Unmarshal(lyricResp.Body, &lyricRes); err != nil || strings.TrimSpace(lyricRes.Lrc.Lyric) == "" {
+		return nil, fmt.Errorf("netease empty lyric")
+	}
+
+	cleaned := CleanLyricsText(lyricRes.Lrc.Lyric)
+	synced := strings.Contains(cleaned, "[")
+
+	return &LyricsResult{
+		Text:     cleaned,
+		Synced:   synced,
+		Provider: p.Name(),
+	}, nil
+}
+
+func (p *NetEaseProvider) FetchLyrics(title, artist, album string, duration int) (*LyricsResult, error) {
+	titleCandidates := tags.ExtractTitleCandidates(title)
+	artistList := tags.ExtractArtistCandidates(artist)
+
+	for _, t := range titleCandidates {
+		for _, a := range artistList {
+			res, err := p.queryNetEase(t, a)
+			if err == nil && res != nil && res.Text != "" {
+				return res, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no lyrics found on netease")
+}
+
