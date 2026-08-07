@@ -3,14 +3,14 @@
  * Single-file script for Feishin Desktop (Electron)
  * 
  * Features:
- *  - Word-by-Word Karaoke Highlighting (Handles sustained notes perfectly!)
+ *  - Universal Word-by-Word Karaoke Highlighting (Enhanced & Standard LRC)
+ *  - Crisp Typography with Active Line Resplandor (Fixes blur/nublado)
  *  - Better Lyrics Shaders (Fluid Mesh Gradient Background Canvas)
- *  - Auto Fallback to LRCLIB API for word-synced lyrics
  */
 (function () {
   'use strict';
 
-  console.log('[Feishin Karaoke Engine] Initializing...');
+  console.log('[Feishin Karaoke Engine v2] Initializing...');
 
   // --- 1. CSS STYLES INJECTION ---
   const style = document.createElement('style');
@@ -30,27 +30,31 @@
       opacity: 0.85;
     }
 
-    /* Active Lyric Line Blur & Scale */
-    .lyric-line, [class*="lyricLine"] {
-      transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1) !important;
-      opacity: 0.45;
-      filter: blur(1.5px);
-      transform: scale(0.97);
-      margin: 12px 0 !important;
-      line-height: 1.6 !important;
+    /* Crisp Lyric Lines (Fixes nublado/blur issue) */
+    p, span, div {
+      transition: color 0.3s ease, opacity 0.3s ease, filter 0.3s ease, transform 0.3s ease;
     }
 
-    .lyric-line.active, [class*="lyricLine"][class*="active"], .k-line-active {
+    .k-line-inactive {
+      opacity: 0.45 !important;
+      filter: blur(0.6px) !important;
+      transform: scale(0.97) !important;
+    }
+
+    .k-line-active, .lyric-line.active, [class*="active"] {
       opacity: 1 !important;
       filter: blur(0px) !important;
       transform: scale(1.04) !important;
+      color: #ffffff !important;
+      font-weight: 700 !important;
+      text-shadow: 0 0 15px rgba(255, 255, 255, 0.8), 0 0 25px rgba(255, 255, 255, 0.5) !important;
     }
 
     /* Word-by-Word Karaoke Highlighting */
     .k-word {
       display: inline-block;
-      transition: color 0.25s ease, transform 0.25s ease, text-shadow 0.3s ease;
-      color: rgba(255, 255, 255, 0.55);
+      transition: color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
+      color: rgba(255, 255, 255, 0.6);
       margin: 0 3px;
       position: relative;
     }
@@ -59,11 +63,11 @@
       color: #ffffff !important;
       font-weight: 700 !important;
       transform: scale(1.08);
-      text-shadow: 0 0 15px rgba(255, 255, 255, 0.9), 0 0 25px rgba(255, 255, 255, 0.6);
+      text-shadow: 0 0 18px rgba(255, 255, 255, 0.95), 0 0 28px rgba(255, 255, 255, 0.7);
     }
 
     .k-word.k-past {
-      color: rgba(255, 255, 255, 0.9) !important;
+      color: rgba(255, 255, 255, 0.92) !important;
     }
   `;
   document.head.appendChild(style);
@@ -100,11 +104,9 @@
     const w = canvas.width;
     const h = canvas.height;
 
-    // Clear background
     ctx.fillStyle = '#050508';
     ctx.fillRect(0, 0, w, h);
 
-    // Animated multi-point fluid radial gradients
     const x1 = w * (0.5 + 0.3 * Math.sin(time * 0.7));
     const y1 = h * (0.5 + 0.3 * Math.cos(time * 0.5));
     const g1 = ctx.createRadialGradient(x1, y1, 10, x1, y1, w * 0.7);
@@ -130,49 +132,49 @@
     animFrameId = requestAnimationFrame(renderShader);
   }
 
-  // --- 3. WORD-BY-WORD KARAOKE ENGINE ---
-  let parsedWordLines = [];
-
-  function parseWordSyncLine(lineText) {
-    // Regex for <mm:ss.xxx> or <mm:ss.xx> timestamps
+  // --- 3. UNIVERSAL WORD-BY-WORD KARAOKE ENGINE ---
+  function parseWordSyncLine(lineText, startTime, endTime) {
     const timestampRegex = /<(\d{2}):(\d{2})\.(\d{2,3})>/g;
-    let match;
-    let words = [];
-    let lastIndex = 0;
-    let lastTime = 0;
-
     const matches = [...lineText.matchAll(timestampRegex)];
-    if (matches.length === 0) return null;
 
-    for (let i = 0; i < matches.length; i++) {
-      const m = matches[i];
-      const minutes = parseInt(m[1], 10);
-      const seconds = parseInt(m[2], 10);
-      const millis = parseInt(m[3].padEnd(3, '0'), 10);
-      const wordTime = minutes * 60 + seconds + millis / 1000;
+    // Explicit word timestamps <mm:ss.xx>
+    if (matches.length > 0) {
+      let words = [];
+      let lastIndex = 0;
+      let lastTime = startTime || 0;
 
-      const wordText = lineText.slice(lastIndex, m.index).replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
-      if (wordText) {
-        words.push({
-          text: wordText,
-          startTime: lastTime,
-          endTime: wordTime
-        });
+      for (let i = 0; i < matches.length; i++) {
+        const m = matches[i];
+        const wordTime = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + parseInt(m[3].padEnd(3, '0'), 10) / 1000;
+        const wordText = lineText.slice(lastIndex, m.index).replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+        if (wordText) {
+          words.push({ text: wordText, startTime: lastTime, endTime: wordTime });
+        }
+        lastTime = wordTime;
+        lastIndex = m.index + m[0].length;
       }
-      lastTime = wordTime;
-      lastIndex = m.index + m[0].length;
+      const tailText = lineText.slice(lastIndex).trim();
+      if (tailText) {
+        words.push({ text: tailText, startTime: lastTime, endTime: lastTime + 3.0 });
+      }
+      return words;
     }
 
-    const tailText = lineText.slice(lastIndex).trim();
-    if (tailText) {
-      words.push({
-        text: tailText,
-        startTime: lastTime,
-        endTime: lastTime + 3.0
-      });
-    }
+    // Standard LRC Line -> Interpolate word timestamps evenly across line duration
+    const cleanText = lineText.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+    if (!cleanText) return null;
 
-    return words;
+    const rawWords = cleanText.split(/\s+/);
+    if (rawWords.length === 0) return null;
+
+    const dur = (endTime && endTime > startTime) ? (endTime - startTime) : 4.0;
+    const step = dur / rawWords.length;
+
+    return rawWords.map((w, idx) => ({
+      text: w,
+      startTime: startTime + (idx * step),
+      endTime: startTime + ((idx + 1) * step)
+    }));
   }
 
   function updateKaraokeHighlight(currentTime) {
@@ -184,6 +186,13 @@
       if (currentTime >= start && currentTime < end) {
         span.classList.add('k-active');
         span.classList.remove('k-past');
+
+        // Ensure parent line is active & unblurred
+        const parentLine = span.closest('p, div, span');
+        if (parentLine) {
+          parentLine.classList.add('k-line-active');
+          parentLine.classList.remove('k-line-inactive');
+        }
       } else if (currentTime >= end) {
         span.classList.remove('k-active');
         span.classList.add('k-past');
@@ -194,18 +203,43 @@
   }
 
   function processLyricLineElements() {
-    const lineElements = document.querySelectorAll('.lyric-line, [class*="lyricLine"]');
-    lineElements.forEach(el => {
-      if (el.dataset.kProcessed) return;
-      const rawText = el.textContent || '';
-      const parsedWords = parseWordSyncLine(rawText);
+    // Find all text elements in lyrics container
+    const allContainers = document.querySelectorAll('[class*="lyric"], [class*="Lyric"]');
+    allContainers.forEach(container => {
+      const lineEls = container.querySelectorAll('p, div, span');
+      let timestamps = [];
 
-      if (parsedWords && parsedWords.length > 0) {
-        el.dataset.kProcessed = 'true';
-        el.innerHTML = parsedWords.map(w =>
-          `<span class="k-word" data-start="${w.startTime}" data-end="${w.endTime}">${w.text}</span>`
-        ).join(' ');
-      }
+      // Extract line timestamps if present
+      lineEls.forEach((el, i) => {
+        const text = el.textContent || '';
+        const m = text.match(/\[(\d{2}):(\d{2})\.(\d{2,3})\]/);
+        if (m) {
+          const t = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + parseInt(m[3].padEnd(3, '0'), 10) / 1000;
+          el.dataset.kStartTime = t;
+          timestamps.push({ idx: i, time: t });
+        }
+      });
+
+      lineEls.forEach((el, i) => {
+        if (el.dataset.kProcessed || el.children.length > 2) return;
+        const text = el.textContent || '';
+        if (!text.trim()) return;
+
+        const startTime = parseFloat(el.dataset.kStartTime) || 0;
+        let endTime = startTime + 4.0;
+
+        // Find next line timestamp for duration
+        const nextTs = timestamps.find(ts => ts.idx > i);
+        if (nextTs) endTime = nextTs.time;
+
+        const words = parseWordSyncLine(text, startTime, endTime);
+        if (words && words.length > 0) {
+          el.dataset.kProcessed = 'true';
+          el.innerHTML = words.map(w =>
+            `<span class="k-word" data-start="${w.startTime}" data-end="${w.endTime}">${w.text}</span>`
+          ).join(' ');
+        }
+      });
     });
   }
 
