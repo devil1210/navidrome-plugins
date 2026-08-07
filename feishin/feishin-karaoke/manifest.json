@@ -1,0 +1,9 @@
+{
+  "name": "Feishin Karaoke & Better Lyrics Shaders",
+  "id": "feishin-karaoke-shaders",
+  "version": "1.0.0",
+  "description": "Word-by-word karaoke highlighting with sustained note timing and WebGL fluid mesh gradient canvas backgrounds for Feishin Desktop.",
+  "author": "devil1210",
+  "main": "feishin-karaoke.js",
+  "license": "GPL-2.0-or-later"
+}
