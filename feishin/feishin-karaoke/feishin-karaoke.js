@@ -1,12 +1,14 @@
 /**
  * Feishin Ultra-Lightweight Karaoke Plugin
  * Intercepts Subsonic API lyrics requests to prevent Feishin React crashes
- * and provides high-performance word-by-word lyric highlighting.
+ * while providing high-precision word-by-word lyric highlighting.
  */
 (function () {
   'use strict';
 
   console.log('[Feishin Karaoke] Initializing interceptor & word highlighter...');
+
+  window.__last_raw_lyrics = '';
 
   // --- 1. MINIMAL CSS STYLES ---
   if (!document.getElementById('feishin-karaoke-styles')) {
@@ -17,7 +19,7 @@
         display: inline !important;
         white-space: pre-wrap !important;
         transition: color 0.15s ease, font-weight 0.15s ease, text-shadow 0.15s ease;
-        color: rgba(255, 255, 255, 0.5);
+        color: rgba(255, 255, 255, 0.45);
         margin: 0 1px;
       }
 
@@ -34,7 +36,7 @@
     document.head.appendChild(style);
   }
 
-  // --- 2. FETCH INTERCEPTOR (Prevents Feishin React Crashes) ---
+  // --- 2. FETCH INTERCEPTOR (Prevents Feishin React Crashes while storing raw word timestamps) ---
   const origFetch = window.fetch;
   window.fetch = async function (...args) {
     const res = await origFetch.apply(this, args);
@@ -46,9 +48,11 @@
         const text = await clone.text();
 
         if (text.includes('<') && text.includes('>')) {
-          let modifiedText = text;
+          // Store original raw lyrics with <mm:ss.xx> for word-level karaoke parsing
+          window.__last_raw_lyrics = text;
+
           // Strip <mm:ss.xx> tags for Feishin React component so React never crashes on XML/HTML angle brackets
-          modifiedText = text.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '');
+          const modifiedText = text.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '');
 
           return new Response(modifiedText, {
             status: res.status,
@@ -64,9 +68,10 @@
   };
 
   // --- 3. WORD PARSER & HIGHLIGHTER ---
-  function parseWordSyncLine(lineText, startTime, endTime) {
+  function parseWordSyncLine(lineText, startTime, endTime, rawLineText) {
+    const sourceText = (rawLineText && rawLineText.includes('<')) ? rawLineText : lineText;
     const timestampRegex = /<(\d{2}):(\d{2})\.(\d{2,3})>/g;
-    const matches = [...lineText.matchAll(timestampRegex)];
+    const matches = [...sourceText.matchAll(timestampRegex)];
 
     if (matches.length > 0) {
       let words = [];
@@ -76,14 +81,14 @@
       for (let i = 0; i < matches.length; i++) {
         const m = matches[i];
         const wordTime = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + parseInt(m[3].padEnd(3, '0'), 10) / 1000;
-        const wordText = lineText.slice(lastIndex, m.index).replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+        const wordText = sourceText.slice(lastIndex, m.index).replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
         if (wordText) {
           words.push({ text: wordText, startTime: lastTime, endTime: wordTime });
         }
         lastTime = wordTime;
         lastIndex = m.index + m[0].length;
       }
-      const tailText = lineText.slice(lastIndex).trim();
+      const tailText = sourceText.slice(lastIndex).trim();
       if (tailText) {
         words.push({ text: tailText, startTime: lastTime, endTime: lastTime + 3.0 });
       }
@@ -126,6 +131,9 @@
 
   function processLyricLineElements() {
     const allContainers = document.querySelectorAll('[class*="lyric"], [class*="Lyric"]');
+    const rawLyrics = window.__last_raw_lyrics || '';
+    const rawLines = rawLyrics ? rawLyrics.split('\n') : [];
+
     allContainers.forEach(container => {
       // Exclude mini-player, cover art overlays, or tiny sidebar widgets
       if (container.closest('[class*="mini"]') || container.closest('[class*="cover"]') || container.closest('[class*="sidebar"]') || container.offsetWidth < 280) {
@@ -156,7 +164,14 @@
         const nextTs = timestamps.find(ts => ts.idx > i);
         if (nextTs) endTime = nextTs.time;
 
-        const words = parseWordSyncLine(text, startTime, endTime);
+        // Match raw line containing <mm:ss.xx> timestamps
+        const rawLine = rawLines.find(rl => {
+          const cleanRl = rl.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '').replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+          const cleanText = text.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+          return cleanRl && cleanText && (cleanRl === cleanText || cleanRl.includes(cleanText));
+        }) || '';
+
+        const words = parseWordSyncLine(text, startTime, endTime, rawLine);
         if (words && words.length > 0) {
           el.dataset.kProcessed = 'true';
           el.innerHTML = words.map(w =>
