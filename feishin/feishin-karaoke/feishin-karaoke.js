@@ -8,26 +8,23 @@
 
   console.log('[Feishin Karaoke] Initializing interceptor & word highlighter...');
 
-  // Global store for raw word-sync lyrics
-  window.__karaoke_raw_lyrics = window.__karaoke_raw_lyrics || {};
-
   // --- 1. MINIMAL CSS STYLES ---
   if (!document.getElementById('feishin-karaoke-styles')) {
     const style = document.createElement('style');
     style.id = 'feishin-karaoke-styles';
     style.textContent = `
       .k-word {
-        display: inline-block;
-        transition: color 0.15s ease, font-weight 0.15s ease, transform 0.15s ease;
+        display: inline !important;
+        white-space: pre-wrap !important;
+        transition: color 0.15s ease, font-weight 0.15s ease, text-shadow 0.15s ease;
         color: rgba(255, 255, 255, 0.5);
-        margin: 0 3px;
+        margin: 0 1px;
       }
 
       .k-word.k-active {
         color: #ffffff !important;
         font-weight: 700 !important;
-        transform: scale(1.08);
-        text-shadow: 0 0 14px rgba(255, 255, 255, 0.95), 0 0 24px rgba(255, 255, 255, 0.5) !important;
+        text-shadow: 0 0 14px rgba(255, 255, 255, 0.95), 0 0 24px rgba(255, 255, 255, 0.6) !important;
       }
 
       .k-word.k-past {
@@ -50,9 +47,6 @@
 
         if (text.includes('<') && text.includes('>')) {
           let modifiedText = text;
-          // Store raw word-sync lyrics for karaoke renderer
-          window.__last_raw_lyrics = text;
-
           // Strip <mm:ss.xx> tags for Feishin React component so React never crashes on XML/HTML angle brackets
           modifiedText = text.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '');
 
@@ -133,6 +127,11 @@
   function processLyricLineElements() {
     const allContainers = document.querySelectorAll('[class*="lyric"], [class*="Lyric"]');
     allContainers.forEach(container => {
+      // Exclude mini-player, cover art overlays, or tiny sidebar widgets
+      if (container.closest('[class*="mini"]') || container.closest('[class*="cover"]') || container.closest('[class*="sidebar"]') || container.offsetWidth < 280) {
+        return;
+      }
+
       const lineEls = container.querySelectorAll('p, div, span');
       let timestamps = [];
 
