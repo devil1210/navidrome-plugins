@@ -81,6 +81,17 @@ func (p *lyricsPlugin) GetLyrics(req lyrics.GetLyricsRequest) (lyrics.GetLyricsR
 
 	// 1. Try querying online providers (LRCLIB, lyrics.ovh)
 	for _, prov := range p.providers {
+		if prov.Name() == "musixmatch-richsync" {
+			enableKaraoke := false
+			if cfgVal, exists := pdk.GetConfig("enable_karaoke"); exists && (cfgVal == "true" || cfgVal == "1") {
+				enableKaraoke = true
+			}
+			if !enableKaraoke {
+				pdk.Log(pdk.LogInfo, "Skipping musixmatch-richsync (Word-level Karaoke is disabled by default in settings)")
+				continue
+			}
+		}
+
 		pdk.Log(pdk.LogInfo, fmt.Sprintf("Querying provider %s for %s - %s (album=%q)", prov.Name(), queryArtist, queryTitle, queryAlbum))
 		res, err := prov.FetchLyrics(queryTitle, queryArtist, queryAlbum, durationSec)
 		if err == nil && res != nil && res.Text != "" {

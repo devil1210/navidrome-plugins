@@ -24,11 +24,17 @@
     "schema": {
       "type": "object",
       "properties": {
+        "enable_karaoke": {
+          "type": "boolean",
+          "title": "Enable Musixmatch Word-Level Karaoke Sync (<mm:ss.xx>)",
+          "description": "Fetch word-level karaoke timestamps. Disabled by default.",
+          "default": false
+        },
         "providers": {
           "type": "string",
           "title": "Lyrics Providers Priority",
-          "description": "Comma-separated list of providers to query in order (e.g. tag,lrclib,ovh).",
-          "default": "tag,musixmatch-richsync,youtube-captions,lrclib,musixmatch-subtitle,netease,ovh"
+          "description": "Comma-separated list of providers to query in order (e.g. tag,youtube-captions,lrclib,musixmatch-subtitle,netease,ovh).",
+          "default": "tag,youtube-captions,lrclib,musixmatch-subtitle,netease,ovh"
         },
         "instrumental_text": {
           "type": "string",
@@ -41,6 +47,10 @@
     "uiSchema": {
       "type": "VerticalLayout",
       "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/enable_karaoke"
+        },
         {
           "type": "Control",
           "scope": "#/properties/providers"
