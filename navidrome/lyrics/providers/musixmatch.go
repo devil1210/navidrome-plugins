@@ -148,6 +148,25 @@ func parseRichSyncBody(richsyncBody string) (string, error) {
 	return result, nil
 }
 
+var rejectKeywords = []string{"demo", "outtake", "commentary", "session", "work tape", "tribute", "karaoke", "cover", "instrumental"}
+
+func isValidTrackVariant(cleanTitle, candidateTitle string) bool {
+	cleanLower := strings.ToLower(cleanTitle)
+	candLower := strings.ToLower(candidateTitle)
+
+	for _, kw := range rejectKeywords {
+		if strings.Contains(candLower, kw) && !strings.Contains(cleanLower, kw) {
+			return false
+		}
+	}
+
+	if strings.Contains(candLower, "live") && !strings.Contains(cleanLower, "live") {
+		return false
+	}
+
+	return true
+}
+
 func searchMusixmatchTracks(tok, title, artist string) ([]musixmatchTrack, error) {
 	qArt := url.QueryEscape(artist)
 	qTrk := url.QueryEscape(title)
@@ -185,6 +204,9 @@ func searchMusixmatchTracks(tok, title, artist string) ([]musixmatchTrack, error
 		for _, item := range searchRes.Message.Body.TrackList {
 			trk := item.Track
 			if trk.TrackID != 0 && !seen[trk.TrackID] {
+				if !isValidTrackVariant(title, trk.TrackName) {
+					continue
+				}
 				seen[trk.TrackID] = true
 				tracks = append(tracks, trk)
 				if trk.HasRichSync == 1 {
