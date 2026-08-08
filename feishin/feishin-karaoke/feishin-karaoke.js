@@ -76,31 +76,56 @@
   // --- 3. WORD PARSER & HIGHLIGHTER ---
   function parseWordSyncLine(lineText, startTime, endTime, rawLineText) {
     const sourceText = (rawLineText && rawLineText.includes('<')) ? rawLineText : lineText;
-    const timestampRegex = /<(\d{2}):(\d{2})\.(\d{2,3})>/g;
-    const matches = [...sourceText.matchAll(timestampRegex)];
+    const timestampRegex = /<(\d{2}):(\d{2})\.(\d{2,3})>/;
 
-    if (matches.length > 0) {
+    // Word-sync parsing with <mm:ss.xx> tags
+    if (sourceText.includes('<')) {
+      const lineNoHeader = sourceText.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
+      const rawTokens = lineNoHeader.split(/\s+/);
+
       let words = [];
-      let lastIndex = 0;
-      let lastTime = startTime || 0;
+      let lineDefaultTime = startTime || 0;
 
-      for (let i = 0; i < matches.length; i++) {
-        const m = matches[i];
-        const wordTime = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + parseInt(m[3].padEnd(3, '0'), 10) / 1000;
-        const wordText = sourceText.slice(lastIndex, m.index).replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
-        if (wordText) {
-          words.push({ text: wordText, startTime: lastTime, endTime: wordTime });
+      for (let i = 0; i < rawTokens.length; i++) {
+        const tok = rawTokens[i];
+        if (!tok.trim()) continue;
+
+        const m = tok.match(timestampRegex);
+        let t = null;
+        if (m) {
+          t = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + parseInt(m[3].padEnd(3, '0'), 10) / 1000;
         }
-        lastTime = wordTime;
-        lastIndex = m.index + m[0].length;
+
+        // Clean all inner timestamp tags to preserve the complete whole word
+        const cleanWord = tok.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '').trim();
+        if (!cleanWord) continue;
+
+        const wStart = (t !== null) ? t : lineDefaultTime;
+
+        words.push({
+          text: cleanWord,
+          startTime: wStart,
+          endTime: wStart + 1.0
+        });
+
+        lineDefaultTime = wStart;
       }
-      const tailText = sourceText.slice(lastIndex).trim();
-      if (tailText) {
-        words.push({ text: tailText, startTime: lastTime, endTime: lastTime + 3.0 });
+
+      if (words.length > 0) {
+        for (let i = 0; i < words.length - 1; i++) {
+          if (words[i + 1].startTime > words[i].startTime) {
+            words[i].endTime = words[i + 1].startTime;
+          } else {
+            words[i].endTime = words[i].startTime + 0.5;
+          }
+        }
+        const lastWord = words[words.length - 1];
+        lastWord.endTime = (endTime && endTime > lastWord.startTime) ? endTime : lastWord.startTime + 3.0;
+        return words;
       }
-      return words;
     }
 
+    // Fallback for line-level sync without <mm:ss.xx> tags
     const cleanText = lineText.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
     if (!cleanText) return null;
 
