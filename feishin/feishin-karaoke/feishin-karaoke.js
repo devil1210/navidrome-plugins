@@ -18,19 +18,21 @@
       .k-word {
         display: inline !important;
         white-space: pre-wrap !important;
-        transition: color 0.15s ease, font-weight 0.15s ease, text-shadow 0.15s ease;
-        color: rgba(255, 255, 255, 0.45);
-        margin: 0 1px;
+        transition: none !important;
+        color: rgba(255, 255, 255, 0.45) !important;
+        margin: 0 1px !important;
       }
 
       .k-word.k-active {
         color: #ffffff !important;
         font-weight: 700 !important;
         text-shadow: 0 0 14px rgba(255, 255, 255, 0.95), 0 0 24px rgba(255, 255, 255, 0.6) !important;
+        transition: none !important;
       }
 
       .k-word.k-past {
         color: rgba(255, 255, 255, 0.88) !important;
+        transition: none !important;
       }
     `;
     document.head.appendChild(style);
