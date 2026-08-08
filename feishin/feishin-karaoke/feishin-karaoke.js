@@ -1,43 +1,79 @@
 /**
  * Feishin Ultra-Lightweight Karaoke Plugin
- * Simple, high-performance word-by-word lyric highlighting.
- * Zero background canvas shaders for maximum performance and 0% CPU load.
+ * Intercepts Subsonic API lyrics requests to prevent Feishin React crashes
+ * and provides high-performance word-by-word lyric highlighting.
  */
 (function () {
   'use strict';
 
-  console.log('[Feishin Karaoke Lightweight] Initializing...');
+  console.log('[Feishin Karaoke] Initializing interceptor & word highlighter...');
+
+  // Global store for raw word-sync lyrics
+  window.__karaoke_raw_lyrics = window.__karaoke_raw_lyrics || {};
 
   // --- 1. MINIMAL CSS STYLES ---
-  const style = document.createElement('style');
-  style.id = 'feishin-karaoke-styles';
-  style.textContent = `
-    /* Clean, high-performance word-by-word highlighting */
-    .k-word {
-      display: inline-block;
-      transition: color 0.15s ease, font-weight 0.15s ease;
-      color: rgba(255, 255, 255, 0.5);
-      margin: 0 3px;
-    }
+  if (!document.getElementById('feishin-karaoke-styles')) {
+    const style = document.createElement('style');
+    style.id = 'feishin-karaoke-styles';
+    style.textContent = `
+      .k-word {
+        display: inline-block;
+        transition: color 0.15s ease, font-weight 0.15s ease, transform 0.15s ease;
+        color: rgba(255, 255, 255, 0.5);
+        margin: 0 3px;
+      }
 
-    .k-word.k-active {
-      color: #ffffff !important;
-      font-weight: 700 !important;
-      text-shadow: 0 0 12px rgba(255, 255, 255, 0.9) !important;
-    }
+      .k-word.k-active {
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        transform: scale(1.08);
+        text-shadow: 0 0 14px rgba(255, 255, 255, 0.95), 0 0 24px rgba(255, 255, 255, 0.5) !important;
+      }
 
-    .k-word.k-past {
-      color: rgba(255, 255, 255, 0.85) !important;
-    }
-  `;
-  document.head.appendChild(style);
+      .k-word.k-past {
+        color: rgba(255, 255, 255, 0.88) !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
 
-  // --- 2. UNIVERSAL WORD PARSER (Enhanced & Standard LRC) ---
+  // --- 2. FETCH INTERCEPTOR (Prevents Feishin React Crashes) ---
+  const origFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const res = await origFetch.apply(this, args);
+    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
+
+    if (url.includes('getLyrics') || url.includes('lyrics') || url.includes('/api/v1/')) {
+      try {
+        const clone = res.clone();
+        const text = await clone.text();
+
+        if (text.includes('<') && text.includes('>')) {
+          let modifiedText = text;
+          // Store raw word-sync lyrics for karaoke renderer
+          window.__last_raw_lyrics = text;
+
+          // Strip <mm:ss.xx> tags for Feishin React component so React never crashes on XML/HTML angle brackets
+          modifiedText = text.replace(/<(\d{2}):(\d{2})\.(\d{2,3})>/g, '');
+
+          return new Response(modifiedText, {
+            status: res.status,
+            statusText: res.statusText,
+            headers: res.headers
+          });
+        }
+      } catch (e) {
+        console.warn('[Feishin Karaoke] Fetch intercept error:', e);
+      }
+    }
+    return res;
+  };
+
+  // --- 3. WORD PARSER & HIGHLIGHTER ---
   function parseWordSyncLine(lineText, startTime, endTime) {
     const timestampRegex = /<(\d{2}):(\d{2})\.(\d{2,3})>/g;
     const matches = [...lineText.matchAll(timestampRegex)];
 
-    // Explicit word timestamps <mm:ss.xx>
     if (matches.length > 0) {
       let words = [];
       let lastIndex = 0;
@@ -60,7 +96,6 @@
       return words;
     }
 
-    // Standard LRC Line -> Interpolate word timestamps evenly across line duration
     const cleanText = lineText.replace(/^\[\d{2}:\d{2}\.\d{2,3}\]/, '').trim();
     if (!cleanText) return null;
 
@@ -133,7 +168,6 @@
     });
   }
 
-  // --- 3. AUDIO TIME TRACKING ---
   function setupAudioTracking() {
     setInterval(() => {
       const audio = document.querySelector('audio');
