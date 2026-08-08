@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
@@ -37,15 +36,11 @@ func (p *LRCLIBProvider) Name() string {
 	return "lrclib"
 }
 
-var wordSyncRegex = regexp.MustCompile(`<[0-9]{2}:[0-9]{2}\.[0-9]{2,3}>`)
-
-// CleanLyricsText removes ^translation annotations and <mm:ss.xxx> word-sync tags common in LRCLIB / TTML synced lyrics.
+// CleanLyricsText removes ^translation annotations common in LRCLIB / TTML synced lyrics.
+// It preserves word-level timestamp tags <mm:ss.xx>.
 func CleanLyricsText(raw string) string {
 	if raw == "" {
 		return ""
-	}
-	if strings.Contains(raw, "<") {
-		raw = wordSyncRegex.ReplaceAllString(raw, "")
 	}
 	if !strings.Contains(raw, "^") {
 		return strings.TrimSpace(raw)

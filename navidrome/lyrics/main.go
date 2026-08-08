@@ -24,7 +24,10 @@ func init() {
 	p := &lyricsPlugin{
 		tagExtractor: tags.NewTagExtractor(),
 		providers: []providers.Provider{
+			&providers.MusixmatchRichSyncProvider{},
+			&providers.YouTubeCaptionsProvider{},
 			&providers.LRCLIBProvider{},
+			&providers.MusixmatchSubtitleProvider{},
 			&providers.NetEaseProvider{},
 			&providers.LyricsOVHProvider{},
 		},

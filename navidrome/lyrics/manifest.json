@@ -28,7 +28,7 @@
           "type": "string",
           "title": "Lyrics Providers Priority",
           "description": "Comma-separated list of providers to query in order (e.g. tag,lrclib,ovh).",
-          "default": "tag,lrclib,ovh"
+          "default": "tag,musixmatch-richsync,youtube-captions,lrclib,musixmatch-subtitle,netease,ovh"
         },
         "instrumental_text": {
           "type": "string",
