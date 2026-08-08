@@ -15,33 +15,28 @@
     const style = document.createElement('style');
     style.id = 'feishin-karaoke-styles';
     style.textContent = `
-      [class*="lyric"], [class*="Lyric"], [class*="word"], [class*="Word"], .k-word {
+      .k-word {
+        display: inline !important;
+        white-space: pre-wrap !important;
         background: transparent !important;
         background-image: none !important;
         -webkit-background-clip: border-box !important;
         background-clip: border-box !important;
         -webkit-text-fill-color: currentcolor !important;
-        animation: none !important;
-        transition: none !important;
-      }
-
-      .k-word {
-        display: inline !important;
-        white-space: pre-wrap !important;
-        color: rgba(255, 255, 255, 0.40) !important;
+        color: rgba(255, 255, 255, 0.45) !important;
         margin: 0 1px !important;
+        transition: color 0.12s ease, font-weight 0.12s ease, text-shadow 0.12s ease, transform 0.12s ease !important;
       }
 
       .k-word.k-active {
         color: #ffffff !important;
         font-weight: 700 !important;
-        opacity: 1 !important;
         text-shadow: 0 0 14px rgba(255, 255, 255, 0.95), 0 0 24px rgba(255, 255, 255, 0.6) !important;
+        transform: scale(1.04) !important;
       }
 
       .k-word.k-past {
         color: rgba(255, 255, 255, 0.88) !important;
-        opacity: 1 !important;
       }
     `;
     document.head.appendChild(style);
