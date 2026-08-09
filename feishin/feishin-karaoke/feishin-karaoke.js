@@ -15,6 +15,18 @@
     const style = document.createElement('style');
     style.id = 'feishin-karaoke-styles';
     style.textContent = `
+      [data-variant="gradient"],
+      .synchronized-karaoke-lyrics [class*="word"],
+      .synchronized-karaoke-lyrics [class*="Word"],
+      [class*="karaoke-word"],
+      [class*="fs-karaoke-lyric-line-module"] {
+        background: transparent !important;
+        background-image: none !important;
+        -webkit-background-clip: unset !important;
+        background-clip: unset !important;
+        -webkit-text-fill-color: unset !important;
+      }
+
       .k-word {
         display: inline !important;
         white-space: pre-wrap !important;
@@ -161,7 +173,7 @@
   }
 
   function processLyricLineElements() {
-    const allContainers = document.querySelectorAll('[class*="lyric"], [class*="Lyric"]');
+    const allContainers = document.querySelectorAll('[class*="lyric"], [class*="Lyric"], [class*="karaoke"], [class*="Karaoke"]');
     const rawLyrics = window.__last_raw_lyrics || '';
     const rawLines = rawLyrics ? rawLyrics.split('\n') : [];
 
@@ -171,7 +183,7 @@
         return;
       }
 
-      const lineEls = container.querySelectorAll('p, div, span');
+      const lineEls = container.querySelectorAll('p, div, span, [class*="line"], [class*="Line"]');
       let timestamps = [];
 
       lineEls.forEach((el, i) => {
@@ -185,7 +197,7 @@
       });
 
       lineEls.forEach((el, i) => {
-        if (el.dataset.kProcessed || el.children.length > 2) return;
+        if (el.dataset.kProcessed || el.querySelector('.k-word')) return;
         const text = el.textContent || '';
         if (!text.trim()) return;
 
@@ -205,6 +217,10 @@
         const words = parseWordSyncLine(text, startTime, endTime, rawLine);
         if (words && words.length > 0) {
           el.dataset.kProcessed = 'true';
+          el.removeAttribute('data-variant');
+          el.style.background = 'transparent';
+          el.style.webkitBackgroundClip = 'border-box';
+          el.style.backgroundClip = 'border-box';
           el.innerHTML = words.map(w =>
             `<span class="k-word" data-start="${w.startTime}" data-end="${w.endTime}">${w.text}</span>`
           ).join(' ');
