@@ -445,17 +445,23 @@ def _apply_romanization(api, track, metadata, file=None):
         else:
             metadata['album'] = _normalize_parentheses_title(_deduplicate_latin_dual(target_album))
 
-    to_convert = {}
-    for k in ('artist', 'albumartist'):
-        v = metadata.get(k)
-        if isinstance(v, list) and v:
-            v = v[0]
-        if v and contains_japanese(v):
-            to_convert[k] = v
-    if to_convert:
-        converted = romanize_dict(to_convert)
-        for k, v in converted.items():
-            metadata[k] = v
+    for k in ('artist', 'albumartist', 'composer', 'conductor', 'engineer', 'mixer', 'performer', 'lyricist', 'arranger'):
+        vals = metadata.getall(k) if hasattr(metadata, 'getall') else metadata.get(k, [])
+        if isinstance(vals, str):
+            vals = [vals]
+        if not vals:
+            continue
+        new_vals = []
+        changed = False
+        for v in vals:
+            if v and contains_japanese(v):
+                new_v = safe_to_romaji(v)
+                new_vals.append(new_v)
+                changed = True
+            else:
+                new_vals.append(v)
+        if changed:
+            metadata[k] = new_vals
 
 
 def _extract_args(args):
