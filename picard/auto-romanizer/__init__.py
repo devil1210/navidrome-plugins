@@ -28,7 +28,7 @@ except Exception as e:
 
 from picard import log
 from picard.config import config
-from picard.plugin3.api import OptionsPage, PluginApi
+from picard.plugin3.api import BaseAction, OptionsPage, PluginApi
 
 PLUGIN_NAME = "Auto Romanizer"
 PLUGIN_AUTHOR = "Dev"
@@ -146,12 +146,40 @@ def _normalize_for_comparison(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', str(s).lower())
 
 
+_romaji_cache = {}
+
+def _get_persisted_romaji(text: str):
+    global _api, _romaji_cache
+    if text in _romaji_cache:
+        return _romaji_cache[text]
+    if _api and hasattr(_api, "plugin_persist") and _api.plugin_persist:
+        try:
+            val = _api.plugin_persist.get("romaji:" + text)
+            if val is not None:
+                _romaji_cache[text] = val
+                return val
+        except Exception:
+            pass
+    return None
+
+def _set_persisted_romaji(text: str, res: str):
+    global _api, _romaji_cache
+    _romaji_cache[text] = res
+    if _api and hasattr(_api, "plugin_persist") and _api.plugin_persist:
+        try:
+            _api.plugin_persist["romaji:" + text] = res
+        except Exception:
+            pass
+
 _PAREN_TRAILER = re.compile(r'^(.*?)\s*(\s*\([^)]*\)\s*)$', re.DOTALL)
 
 def safe_to_romaji(text: str) -> str:
     """Convert Japanese text to romaji, preserving parenthetical qualifiers verbatim."""
     if not text or not contains_japanese(text):
         return text
+    cached = _get_persisted_romaji(str(text))
+    if cached is not None:
+        return cached
     try:
         import pykakasi
         kks = pykakasi.kakasi()
@@ -315,7 +343,9 @@ def safe_to_romaji(text: str) -> str:
         if trailer:
             res = res + trailer
 
-        return res if res else str(text)
+        final_res = res if res else str(text)
+        _set_persisted_romaji(str(text), final_res)
+        return final_res
     except Exception as e:
         log.error("Auto Romanizer safe_to_romaji error for %r: %s", text, e)
         return str(text)
@@ -853,6 +883,23 @@ class AutoRomanizerOptionsPage(OptionsPage):
         config.setting[TITLE_MODE_OPTION] = mode
 
 
+class RomanizeAction(BaseAction):
+    NAME = "Auto Romanize (Japonés / CJK -> Romaji)"
+    TITLE = "Auto Romanize (Japonés / CJK -> Romaji)"
+
+    def callback(self, objs):
+        for obj in objs:
+            if hasattr(obj, "metadata"):
+                _apply_romanization(_api, getattr(obj, "track", None) or obj, obj.metadata, file=obj if hasattr(obj, "filename") else None)
+            if hasattr(obj, "tracks"):
+                for t in obj.tracks:
+                    if hasattr(t, "metadata"):
+                        _apply_romanization(_api, t, t.metadata)
+                    for f in getattr(t, "linked_files", []):
+                        if hasattr(f, "metadata"):
+                            _apply_romanization(_api, t, f.metadata, file=f)
+
+
 def enable(api: PluginApi):
     global _api
     _api = api
@@ -865,4 +912,17 @@ def enable(api: PluginApi):
     api.register_track_metadata_processor(process_track)
     api.register_album_metadata_processor(process_album)
     api.register_file_post_addition_to_track_processor(on_file_added_to_track)
+    api.register_track_action(RomanizeAction)
+    api.register_album_action(RomanizeAction)
+    api.register_file_action(RomanizeAction)
+    if hasattr(api, "register_tag_action"):
+        try:
+            api.register_tag_action(RomanizeAction)
+        except Exception:
+            pass
+    if hasattr(api, "register_metadata_tag_action"):
+        try:
+            api.register_metadata_tag_action(RomanizeAction)
+        except Exception:
+            pass
     api.register_options_page(AutoRomanizerOptionsPage)

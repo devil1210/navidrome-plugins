@@ -1,6 +1,6 @@
 uuid = "073e85d6-52e1-41cd-94ac-d16046147dda"
 name = "Auto Romanizer"
-version = "1.0.2"
+version = "1.1.0"
 authors = ['SPbot']
 description = "Romaniza automáticamente títulos, artistas y álbumes de japonés a Romaji preservando metadatos originales."
 categories = ['metadata', 'ui']
