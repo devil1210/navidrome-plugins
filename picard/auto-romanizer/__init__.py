@@ -38,8 +38,13 @@ PLUGIN_API_VERSIONS = ["3.0", "3.1", "3.2"]
 
 TITLE_MODE_OPTION = "auto_romanizer_mode"
 DEFAULT_MODE = "auto"  # "auto" (dual), "japanese", "romaji"
+MAX_DUAL_LEN_OPTION = "auto_romanizer_max_dual_len"
+DEFAULT_MAX_DUAL_LEN = 65
+FALLBACK_ROMAJI_LONG_OPTION = "auto_romanizer_fallback_long"
+DEFAULT_FALLBACK_ROMAJI_LONG = True
 
 _api = None
+
 
 LATIN_META_WORDS = {
     'feat', 'ft', 'cv', 'tv', 'ver', 'version', 'vs', 'ep', 'op', 'ed',
@@ -516,12 +521,18 @@ def _deduplicate_latin_dual(title_text: str) -> str:
 def _get_latin_part(dual_title):
     if not dual_title:
         return ""
+    paren_m = re.search(r'\((.+)\)\s*$', str(dual_title))
+    if paren_m:
+        content = paren_m.group(1).strip()
+        if not contains_japanese(content):
+            return content
     parts = re.split(r'\s*[\-\–\—\/]\s*', str(dual_title))
     for p in parts:
         p = p.strip()
-        if not contains_japanese(p):
+        if not contains_japanese(p) and any(c.isalpha() for c in p):
             return p
     return ""
+
 
 
 def _extract_local_title_from_file(f):
@@ -617,6 +628,9 @@ def _apply_romanization(api, track, metadata, file=None):
             if local_title:
                 break
 
+    max_dual_len = int(_get_option(MAX_DUAL_LEN_OPTION, DEFAULT_MAX_DUAL_LEN))
+    fallback_long = bool(_get_option(FALLBACK_ROMAJI_LONG_OPTION, DEFAULT_FALLBACK_ROMAJI_LONG))
+
     # For target_title selection:
     # - For Japanese titles: prefer local_title (file on disk may already have dual JP - Romaji format)
     # - For pure Latin titles: ALWAYS prefer orig_title from MusicBrainz, because the file on disk
@@ -637,15 +651,21 @@ def _apply_romanization(api, track, metadata, file=None):
                     if contains_japanese(p):
                         jp_only = p.strip()
                         break
+                lat = _get_latin_part(target_title)
                 if mode in ("auto", "dual"):
-                    metadata['title'] = target_title
+                    if fallback_long and len(target_title) > max_dual_len and lat:
+                        metadata['title'] = lat
+                        log.info(f"[Auto Romanizer] Long title fallback to Romaji ({len(target_title)} > {max_dual_len}): '{lat}'")
+                    else:
+                        metadata['title'] = target_title
                 elif mode == "japanese":
                     if jp_only:
                         metadata['title'] = jp_only
                 elif mode == "romaji":
-                    lat = _get_latin_part(target_title)
                     if lat:
                         metadata['title'] = lat
+                    else:
+                        metadata['title'] = safe_to_romaji(target_title)
             else:
                 clean_jp = _strip_track_num_prefix(target_title)
                 jp_only = clean_jp
@@ -666,9 +686,13 @@ def _apply_romanization(api, track, metadata, file=None):
                         romaji = safe_to_romaji(jp_core)
                         log.info(f"[Auto Romanizer] safe_to_romaji('{jp_core}') produced: '{romaji}'")
                         if romaji and romaji != jp_core:
-                            new_t = f"{clean_jp} - {romaji}{jp_suffix}"
-                            metadata['title'] = new_t
-                            log.info(f"[Auto Romanizer] Converted: '{orig_title}' -> '{new_t}'")
+                            dual_t = f"{clean_jp} - {romaji}{jp_suffix}"
+                            if fallback_long and len(dual_t) > max_dual_len:
+                                metadata['title'] = f"{romaji}{jp_suffix}"
+                                log.info(f"[Auto Romanizer] Long title fallback to Romaji ({len(dual_t)} > {max_dual_len}): '{romaji}{jp_suffix}'")
+                            else:
+                                metadata['title'] = dual_t
+                                log.info(f"[Auto Romanizer] Converted: '{orig_title}' -> '{dual_t}'")
                         else:
                             metadata['title'] = clean_jp
                     except Exception as err:
@@ -709,17 +733,24 @@ def _apply_romanization(api, track, metadata, file=None):
     # Check if orig_album already has official English translation from MB (e.g. parenthetical English title)
     if orig_album and already_has_latin_translation(orig_album):
         if not re.search(r'orijinaru|saundotorakku', orig_album, re.IGNORECASE):
+            lat = _get_latin_part(orig_album)
+            lat_parts = re.split(r'\s*[\-\–\—\/]\s*|\s*\([^)]*\)\s*$', orig_album)
+            jp_p = [p.strip() for p in lat_parts if contains_japanese(p)]
+            if jp_p and not metadata.get('originalalbum'):
+                metadata['originalalbum'] = jp_p[0]
+
             if mode in ("auto", "dual"):
-                metadata['album'] = _normalize_parentheses_title(orig_album)
+                if fallback_long and len(orig_album) > max_dual_len and lat:
+                    metadata['album'] = _normalize_parentheses_title(lat)
+                    log.info(f"[Auto Romanizer] Long album fallback to Romaji ({len(orig_album)} > {max_dual_len}): '{lat}'")
+                else:
+                    metadata['album'] = _normalize_parentheses_title(orig_album)
             elif mode == "japanese":
-                lat_parts = re.split(r'\s*[\-\–\—\/]\s*|\s*\([^)]*\)\s*$', orig_album)
-                jp_p = [p.strip() for p in lat_parts if contains_japanese(p)]
                 if jp_p:
                     metadata['album'] = jp_p[0]
             elif mode == "romaji":
-                lat = _get_latin_part(orig_album)
                 if lat:
-                    metadata['album'] = lat
+                    metadata['album'] = _normalize_parentheses_title(lat)
             jp_base_album = None
         else:
             jp_base_album = None
@@ -746,7 +777,12 @@ def _apply_romanization(api, track, metadata, file=None):
         rom_alb = safe_to_romaji(clean_jp_alb)
         if mode in ("auto", "dual"):
             if rom_alb and rom_alb != clean_jp_alb:
-                metadata['album'] = _normalize_parentheses_title(f"{clean_jp_alb} - {rom_alb}")
+                dual_alb = _normalize_parentheses_title(f"{clean_jp_alb} - {rom_alb}")
+                if fallback_long and len(dual_alb) > max_dual_len:
+                    metadata['album'] = _normalize_parentheses_title(rom_alb)
+                    log.info(f"[Auto Romanizer] Long generated album fallback to Romaji ({len(dual_alb)} > {max_dual_len}): '{rom_alb}'")
+                else:
+                    metadata['album'] = dual_alb
             else:
                 metadata['album'] = clean_jp_alb
         elif mode == "japanese":
@@ -757,6 +793,7 @@ def _apply_romanization(api, track, metadata, file=None):
         target_album = local_album if local_album else orig_album
         if target_album:
             metadata['album'] = _normalize_parentheses_title(_deduplicate_latin_dual(target_album))
+
 
 
 
@@ -860,8 +897,18 @@ class AutoRomanizerOptionsPage(OptionsPage):
             "Original: conservar Japonés sin cambiar (ej: プラネタリウム)", "japanese"
         )
 
+        self.check_fallback_long = QtWidgets.QCheckBox(
+            "Solo usar Romaji cuando el texto combinado supere la longitud máxima (evita nombres gigantes)", self
+        )
+        self.spin_max_len = QtWidgets.QSpinBox(self)
+        self.spin_max_len.setRange(30, 200)
+        self.spin_max_len.setSingleStep(5)
+        self.spin_max_len.setValue(DEFAULT_MAX_DUAL_LEN)
+
         form = QtWidgets.QFormLayout()
         form.addRow(QtWidgets.QLabel("Modo de conversión de títulos:"), self.combo_mode)
+        form.addRow(self.check_fallback_long)
+        form.addRow(QtWidgets.QLabel("Longitud máxima para título/álbum dual (caracteres):"), self.spin_max_len)
 
         group = QtWidgets.QGroupBox("Formato de Títulos en Japonés", self)
         group.setLayout(form)
@@ -876,11 +923,25 @@ class AutoRomanizerOptionsPage(OptionsPage):
         if index >= 0:
             self.combo_mode.setCurrentIndex(index)
 
+        fallback = _get_option(FALLBACK_ROMAJI_LONG_OPTION, DEFAULT_FALLBACK_ROMAJI_LONG)
+        self.check_fallback_long.setChecked(bool(fallback))
+
+        max_len = int(_get_option(MAX_DUAL_LEN_OPTION, DEFAULT_MAX_DUAL_LEN))
+        self.spin_max_len.setValue(max_len)
+
     def save(self):
         mode = self.combo_mode.currentData()
+        fallback = self.check_fallback_long.isChecked()
+        max_len = self.spin_max_len.value()
+
         if hasattr(self, 'api') and self.api and hasattr(self.api, 'plugin_config'):
             self.api.plugin_config[TITLE_MODE_OPTION] = mode
+            self.api.plugin_config[FALLBACK_ROMAJI_LONG_OPTION] = fallback
+            self.api.plugin_config[MAX_DUAL_LEN_OPTION] = max_len
+
         config.setting[TITLE_MODE_OPTION] = mode
+        config.setting[FALLBACK_ROMAJI_LONG_OPTION] = fallback
+        config.setting[MAX_DUAL_LEN_OPTION] = max_len
 
 
 class RomanizeAction(BaseAction):
@@ -906,11 +967,14 @@ def enable(api: PluginApi):
     if hasattr(api, "plugin_config") and hasattr(api.plugin_config, "register_option"):
         try:
             api.plugin_config.register_option(TITLE_MODE_OPTION, DEFAULT_MODE)
+            api.plugin_config.register_option(FALLBACK_ROMAJI_LONG_OPTION, DEFAULT_FALLBACK_ROMAJI_LONG)
+            api.plugin_config.register_option(MAX_DUAL_LEN_OPTION, DEFAULT_MAX_DUAL_LEN)
         except Exception:
             pass
-    log.info("[Auto Romanizer] Engine v1.0.1 with vendored jaconv initialized!")
+    log.info("[Auto Romanizer] Engine initialized with max length threshold support!")
     api.register_track_metadata_processor(process_track)
     api.register_album_metadata_processor(process_album)
+
     api.register_file_post_addition_to_track_processor(on_file_added_to_track)
     api.register_track_action(RomanizeAction)
     api.register_album_action(RomanizeAction)
