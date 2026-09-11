@@ -30,6 +30,8 @@ const (
 	cfgSubsonicClient      = "subsonic_client"
 	cfgSubsonicAPIVersion  = "subsonic_api_version"
 	cfgSubsonicCoverSize   = "subsonic_cover_size"
+	cfgLibraries           = "libraries"
+	cfgExcludedLibraries   = "excluded_libraries"
 	cfgPollInterval        = "poll_interval"
 	cfgMessageTitle        = "message_title"
 	cfgMessageBody         = "message_body"
@@ -75,6 +77,27 @@ type subsonicAlbum struct {
 	Genre     string `json:"genre"`
 	SongCount int    `json:"songCount"`
 	Duration  int    `json:"duration"`
+	Created   string `json:"created"`
+	Library   string `json:"-"`
+	FolderID  string `json:"-"`
+}
+
+type subsonicMusicFolder struct {
+	ID   json.RawMessage `json:"id"`
+	Name string          `json:"name"`
+}
+
+func (f subsonicMusicFolder) IDStr() string {
+	return strings.Trim(string(f.ID), "\"")
+}
+
+type subsonicMusicFoldersResponse struct {
+	SubsonicResponse struct {
+		Status       string `json:"status"`
+		MusicFolders struct {
+			MusicFolder []subsonicMusicFolder `json:"musicFolder"`
+		} `json:"musicFolders"`
+	} `json:"subsonic-response"`
 }
 
 type subsonicAlbumList2Response struct {
@@ -157,7 +180,18 @@ func pollAndNotify() error {
 		return nil
 	}
 
-	albums, err := fetchNewestAlbums(subsonicUser)
+	incConfig := strings.TrimSpace(getConfigOrDefault(cfgLibraries, ""))
+	excConfig := strings.TrimSpace(getConfigOrDefault(cfgExcludedLibraries, ""))
+
+	if incConfig == "" && excConfig == "" {
+		return pollAndNotifyGlobal(botToken, chatIDConfig, subsonicUser)
+	}
+
+	return pollAndNotifyFiltered(botToken, chatIDConfig, subsonicUser, incConfig, excConfig)
+}
+
+func pollAndNotifyGlobal(botToken, chatIDConfig, subsonicUser string) error {
+	albums, err := fetchNewestAlbums(subsonicUser, "")
 	if err != nil {
 		pdk.Log(pdk.LogError, fmt.Sprintf("failed to fetch album list: %v", err))
 		return nil
@@ -223,7 +257,6 @@ func pollAndNotify() error {
 	}
 
 	// If we processed the full list (or the final batch), we make sure the watermark matches the overall newest album.
-	// This is a safety check to align the watermark.
 	if !isBatched {
 		if err := saveLastSeenID(albums[0].ID); err != nil {
 			pdk.Log(pdk.LogWarn, fmt.Sprintf("failed to persist final last_seen_album_id: %v", err))
@@ -235,8 +268,181 @@ func pollAndNotify() error {
 	return nil
 }
 
-func fetchNewestAlbums(username string) ([]subsonicAlbum, error) {
+func pollAndNotifyFiltered(botToken, chatIDConfig, subsonicUser, incConfig, excConfig string) error {
+	allFolders, err := fetchMusicFolders(subsonicUser)
+	if err != nil {
+		pdk.Log(pdk.LogError, fmt.Sprintf("failed to fetch music folders: %v", err))
+		return nil
+	}
+
+	targetFolders, _ := resolveTargetLibraries(allFolders, incConfig, excConfig)
+	if len(targetFolders) == 0 {
+		pdk.Log(pdk.LogWarn, "no libraries matched the configured include/exclude filters; skipping poll")
+		return nil
+	}
+
+	var allNewAlbums []subsonicAlbum
+	newestPerFolder := make(map[string]string)
+
+	for _, folder := range targetFolders {
+		folderID := folder.IDStr()
+		albums, err := fetchNewestAlbums(subsonicUser, folderID)
+		if err != nil {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("failed to fetch album list for library %q (id=%s): %v", folder.Name, folderID, err))
+			continue
+		}
+
+		if len(albums) == 0 {
+			continue
+		}
+
+		newestPerFolder[folderID] = albums[0].ID
+
+		lastSeenID := loadLastSeenIDForFolder(folderID)
+		if lastSeenID == "" {
+			if err := saveLastSeenIDForFolder(folderID, albums[0].ID); err != nil {
+				pdk.Log(pdk.LogWarn, fmt.Sprintf("failed to persist initial watermark for library %q: %v", folder.Name, err))
+			} else {
+				pdk.Log(pdk.LogInfo, fmt.Sprintf("first run for library %q (id=%s): watermark set to album id=%s name=%q artist=%q", folder.Name, folderID, albums[0].ID, albums[0].Name, albums[0].Artist))
+			}
+			continue
+		}
+
+		newOnes := collectNewAlbums(albums, lastSeenID)
+		for _, a := range newOnes {
+			a.Library = folder.Name
+			a.FolderID = folderID
+			allNewAlbums = append(allNewAlbums, a)
+		}
+	}
+
+	if len(allNewAlbums) == 0 {
+		pdk.Log(pdk.LogDebug, "no new albums found across targeted libraries")
+		return nil
+	}
+
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("found %d new album(s) across targeted libraries", len(allNewAlbums)))
+
+	// Sort albums chronologically from oldest to newest by Created date
+	sort.Slice(allNewAlbums, func(i, j int) bool {
+		if allNewAlbums[i].Created != allNewAlbums[j].Created {
+			return allNewAlbums[i].Created < allNewAlbums[j].Created
+		}
+		return allNewAlbums[i].ID < allNewAlbums[j].ID
+	})
+
+	maxBatch := 5
+	isBatched := false
+	if len(allNewAlbums) > maxBatch {
+		pdk.Log(pdk.LogInfo, fmt.Sprintf("batching notification: only processing %d oldest new albums in this poll", maxBatch))
+		allNewAlbums = allNewAlbums[:maxBatch]
+		isBatched = true
+	}
+
+	for _, a := range allNewAlbums {
+		songs, err := fetchAlbumSongs(a.ID, subsonicUser)
+		if err != nil {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("failed to fetch songs for album %s (id=%s): %v", a.Name, a.ID, err))
+		}
+
+		title, body, imageURL := renderMessage(a, songs)
+		pdk.Log(pdk.LogInfo, fmt.Sprintf("sending notification for album id=%s name=%q artist=%q library=%q", a.ID, a.Name, a.Artist, a.Library))
+
+		if err := sendTelegramDirect(botToken, chatIDConfig, title, body, imageURL, a, songs); err != nil {
+			pdk.Log(pdk.LogError, fmt.Sprintf("telegram POST failed for album %q: %v", a.ID, err))
+			return nil
+		}
+
+		if err := saveLastSeenIDForFolder(a.FolderID, a.ID); err != nil {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("failed to persist watermark for library %s: %v", a.FolderID, err))
+		} else {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("progressively updated last_seen_album_id for library %s=%s", a.FolderID, a.ID))
+		}
+	}
+
+	if !isBatched {
+		for folderID, newestID := range newestPerFolder {
+			_ = saveLastSeenIDForFolder(folderID, newestID)
+		}
+	}
+
+	return nil
+}
+
+func fetchMusicFolders(username string) ([]subsonicMusicFolder, error) {
+	uri := fmt.Sprintf("getMusicFolders?u=%s", username)
+	responseJSON, err := host.SubsonicAPICall(uri)
+	if err != nil {
+		return nil, fmt.Errorf("subsonicapi call getMusicFolders: %w", err)
+	}
+
+	var parsed subsonicMusicFoldersResponse
+	if err := json.Unmarshal([]byte(responseJSON), &parsed); err != nil {
+		return nil, fmt.Errorf("parse getMusicFolders response: %w", err)
+	}
+
+	if parsed.SubsonicResponse.Status != "ok" {
+		return nil, fmt.Errorf("getMusicFolders response status: %s", parsed.SubsonicResponse.Status)
+	}
+
+	return parsed.SubsonicResponse.MusicFolders.MusicFolder, nil
+}
+
+func splitAndClean(val string) []string {
+	var res []string
+	for _, part := range strings.Split(val, ",") {
+		t := strings.ToLower(strings.TrimSpace(part))
+		if t != "" {
+			res = append(res, t)
+		}
+	}
+	return res
+}
+
+func isMatch(id, nameLower string, list []string) bool {
+	for _, item := range list {
+		if item == strings.ToLower(id) || item == nameLower {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveTargetLibraries(allFolders []subsonicMusicFolder, incConfig, excConfig string) ([]subsonicMusicFolder, bool) {
+	incList := splitAndClean(incConfig)
+	excList := splitAndClean(excConfig)
+
+	if len(incList) == 0 && len(excList) == 0 {
+		return allFolders, false
+	}
+
+	var matched []subsonicMusicFolder
+	for _, folder := range allFolders {
+		folderID := folder.IDStr()
+		folderNameLower := strings.ToLower(folder.Name)
+
+		if isMatch(folderID, folderNameLower, excList) {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("library %q (id=%s) excluded by filter", folder.Name, folderID))
+			continue
+		}
+
+		if len(incList) > 0 {
+			if !isMatch(folderID, folderNameLower, incList) {
+				continue
+			}
+		}
+
+		matched = append(matched, folder)
+	}
+
+	return matched, true
+}
+
+func fetchNewestAlbums(username string, folderID string) ([]subsonicAlbum, error) {
 	uri := fmt.Sprintf("getAlbumList2?type=newest&size=%s&u=%s", defaultPollSize, username)
+	if folderID != "" {
+		uri = fmt.Sprintf("getAlbumList2?type=newest&size=%s&musicFolderId=%s&u=%s", defaultPollSize, folderID, username)
+	}
 	responseJSON, err := host.SubsonicAPICall(uri)
 	if err != nil {
 		return nil, fmt.Errorf("subsonicapi call: %w", err)
@@ -664,6 +870,7 @@ func applyTemplate(input string, album subsonicAlbum, songs []subsonicSong) stri
 		"{songCount}", songCountStr,
 		"{duration}", durationStr,
 		"{songs}", formatSongList(songs),
+		"{library}", album.Library,
 		"{url}", albumURL,
 	)
 	return replacer.Replace(input)
@@ -737,6 +944,7 @@ func applyTemplateTelegram(input string, album subsonicAlbum, songs []subsonicSo
 		"{songCount}", escapeValue(songCountStr, parseMode),
 		"{duration}", escapeValue(durationStr, parseMode),
 		"{songs}", formatSongListTelegram(songs, parseMode),
+		"{library}", escapeValue(album.Library, parseMode),
 		"{url}", escapeValue(albumURL, parseMode),
 	)
 
@@ -912,10 +1120,30 @@ func sendTelegramDirect(botToken, chatIDConfig, title, body, imageURL string, al
 	return nil
 }
 
+func folderWatermarkKey(folderID string) string {
+	return fmt.Sprintf("%s_%s", kvLastSeenAlbum, folderID)
+}
+
+func loadLastSeenIDForFolder(folderID string) string {
+	return loadKV(folderWatermarkKey(folderID))
+}
+
+func saveLastSeenIDForFolder(folderID, id string) error {
+	return saveKV(folderWatermarkKey(folderID), id)
+}
+
 func loadLastSeenID() string {
-	value, exists, err := host.KVStoreGet(kvLastSeenAlbum)
+	return loadKV(kvLastSeenAlbum)
+}
+
+func saveLastSeenID(id string) error {
+	return saveKV(kvLastSeenAlbum, id)
+}
+
+func loadKV(key string) string {
+	value, exists, err := host.KVStoreGet(key)
 	if err != nil {
-		pdk.Log(pdk.LogWarn, fmt.Sprintf("kvstore get error: %v", err))
+		pdk.Log(pdk.LogWarn, fmt.Sprintf("kvstore get error for key %s: %v", key, err))
 		return ""
 	}
 	if !exists {
@@ -924,8 +1152,8 @@ func loadLastSeenID() string {
 	return string(value)
 }
 
-func saveLastSeenID(id string) error {
-	return host.KVStoreSet(kvLastSeenAlbum, []byte(id))
+func saveKV(key, val string) error {
+	return host.KVStoreSet(key, []byte(val))
 }
 
 func main() {}

@@ -49,10 +49,12 @@ Set these values in the Navidrome web UI under **Settings → Plugins → Telegr
 | `subsonic_user` | Yes | Navidrome username the plugin uses for internal Subsonic API calls. |
 | `subsonic_password` | No | Navidrome password used to generate token-authenticated getCoverArt URLs. |
 | `subsonic_base_url` | No | Base URL used to build cover art URLs (e.g. `https://navidrome.example.com`). |
-| `use_subsonic_cover_art` | No | If enabled and `image_url_template` is blank, generates cover art URLs automatically. |
+| `subsonic_client` | No | Client name sent in generated cover-art URLs. Default: `navidrome-telegram-plugin`. |
+| `libraries` | No | Comma-separated list of music libraries (names or IDs) to include (e.g. `General, Soundtracks`). Leave empty to include all libraries. |
+| `excluded_libraries` | No | Comma-separated list of music libraries (names or IDs) to exclude/ignore (e.g. `Descargas, Omitidos`). Excluded libraries never trigger notifications. |
 | `poll_interval` | No | Cron expression override. Default: `*/1 * * * *` (every minute). |
-| `message_title` | No | Template for the notification title. Placeholders: `{album}`, `{artist}`, `{id}`, `{url}`. |
-| `message_body` | No | Template for the notification body. Placeholders: `{album}`, `{artist}`, `{id}`, `{year}`, `{genre}`, `{songCount}`, `{duration}`, `{songs}`, `{url}`. |
+| `message_title` | No | Template for the notification title. Placeholders: `{album}`, `{artist}`, `{id}`, `{library}`, `{url}`. |
+| `message_body` | No | Template for the notification body. Placeholders: `{album}`, `{artist}`, `{id}`, `{year}`, `{genre}`, `{discCount}`, `{songCount}`, `{duration}`, `{songs}`, `{library}`, `{url}`. |
 | `image_url_template` | No | Optional static or parameterized image URL template to attach. |
 
 
@@ -72,6 +74,7 @@ You can customize `message_title` and `message_body` templates using placeholder
 | `{songCount}` | Total number of tracks/songs in the album. | `17` |
 | `{duration}` | Total duration of the album formatted as `MM:SS` (or `H:MM:SS`). | `47:23` |
 | `{songs}` | Formatted list of all songs in the album. Auto-formats as an HTML list if HTML parse mode is active. | *See format below* |
+| `{library}` | The name of the music library folder where the album is located (e.g. `General`). | `General` |
 | `{url}` | The direct link to the album page in Navidrome (requires `subsonic_base_url` to be set). | `https://navidrome.example.com/#/album/3UUAz...` |
 
 #### Song List Formatting (`{songs}`)

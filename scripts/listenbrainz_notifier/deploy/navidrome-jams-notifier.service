@@ -1,0 +1,17 @@
+[Unit]
+Description=Navidrome ListenBrainz Missing Jams Notifier and Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/navidrome-scripts/listenbrainz_notifier
+ExecStart=/opt/navidrome-scripts/listenbrainz_notifier/venv/bin/python3 /opt/navidrome-scripts/listenbrainz_notifier/notifier.py --bot
+Restart=always
+RestartSec=10
+MemoryHigh=180M
+MemoryMax=250M
+RuntimeMaxSec=12h
+
+[Install]
+WantedBy=multi-user.target

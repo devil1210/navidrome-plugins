@@ -1,0 +1,12 @@
+[Unit]
+Description=Timer for Navidrome ListenBrainz Missing Jams Notifier
+After=network.target
+
+[Timer]
+# Runs every 30 minutes, or adjust according to ListenBrainz sync schedule
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

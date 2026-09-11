@@ -1,9 +1,38 @@
 # Environment variables & secrets
 .env
 .env.local
+*.env
+.state.json
 Lista.md
 demora.txt
 roma1.txt
+
+# Caches & temporary data
+*.cache
+*.cache.json
+.*_cache.json
+.download_queue.json
+lbz_recs_cache.json
+.lbz_cache.json
+
+# Audio and media files
+*.m4a
+*.mp3
+*.flac
+*.opus
+*.ogg
+*.wav
+*.aac
+*.jpg
+*.jpeg
+*.png
+
+# Backups and temporary test libraries
+_duplicados_backup/
+scratch/
+General/
+Soundtracks/
+J-Music/
 
 # Compiled WASM binaries & NDP packages
 *.wasm
@@ -17,3 +46,6 @@ roma1.txt
 *.swp
 __pycache__/
 *.pyc
+venv/
+.venv/
+

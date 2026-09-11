@@ -1,8 +1,8 @@
 {
   "name": "Telegram New Album Notifications",
   "author": "Devil_1210",
-  "version": "1.5.5",
-  "description": "Polls Navidrome for newly added albums and sends notifications directly to Telegram, with optional Subsonic cover-art URLs.",
+  "version": "1.6.0",
+  "description": "Polls Navidrome for newly added albums and sends notifications directly to Telegram, with library filtering and optional Subsonic cover-art URLs.",
   "website": "https://github.com/devil1210/navidrome-telegram-plugin",
   "config": {
     "schema": {
@@ -67,6 +67,16 @@
           "description": "Client name sent as the 'c' parameter in generated getCoverArt URLs.",
           "default": "navidrome-telegram-plugin"
         },
+        "libraries": {
+          "type": "string",
+          "title": "Included Libraries",
+          "description": "Optional comma-separated list of music libraries (names or IDs) to notify from (e.g. General, Soundtracks). Leave empty to allow all."
+        },
+        "excluded_libraries": {
+          "type": "string",
+          "title": "Excluded Libraries",
+          "description": "Optional comma-separated list of music libraries (names or IDs) to ignore (e.g. Descargas, Omitidos). Ignored libraries will never trigger notifications."
+        },
         "poll_interval": {
           "type": "string",
           "title": "Poll Interval (cron)",
@@ -76,13 +86,13 @@
         "message_title": {
           "type": "string",
           "title": "Message Title Template",
-          "description": "Notification title. You can use {album}, {artist}, {id}, and {url} placeholders.",
+          "description": "Notification title. You can use {album}, {artist}, {id}, {library}, and {url} placeholders.",
           "default": "<h2>📚 {album}</h2>\n<h4>👤 {artist}</h4>"
         },
         "message_body": {
           "type": "string",
           "title": "Message Body Template",
-          "description": "Notification body. Supports {album}, {artist}, {id}, {year}, {genre}, {discCount}, {songCount}, {duration}, {songs}, and {url} placeholders. Use plain text or markdown/HTML depending on parse mode.",
+          "description": "Notification body. Supports {album}, {artist}, {id}, {year}, {genre}, {discCount}, {songCount}, {duration}, {songs}, {library}, and {url} placeholders. Use plain text or markdown/HTML depending on parse mode.",
           "default": "<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n {songs}\n</details>\n\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
         },
         "image_url_template": {
@@ -149,6 +159,14 @@
         {
           "type": "Control",
           "scope": "#/properties/subsonic_client"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/libraries"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/excluded_libraries"
         },
         {
           "type": "Control",
