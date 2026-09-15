@@ -131,14 +131,13 @@ class MusicDownloader:
             "outtmpl": outtmpl,
             "nooverwrites": True,
             "overwrites": False,
-            "writethumbnail": True,
+            "writethumbnail": False,
             "allow_playlist_files": False,
             "windowsfilenames": True,
             "concurrent_fragment_downloads": 4,
             "remote_components": ["ejs:github"],
             "postprocessors": [
                 {"key": "FFmpegMetadata", "add_metadata": True},
-                {"key": "EmbedThumbnail", "already_have_thumbnail": False},
             ],
             "ignoreerrors": True,
             "retries": 3,
@@ -153,6 +152,9 @@ class MusicDownloader:
         current_cookie = self.get_current_cookie()
         if current_cookie:
             opts["cookiefile"] = current_cookie
+
+        # Use ultra-lightweight QuickJS (<2MB RAM) for YouTube JS challenges
+        opts["js_runtimes"] = {"quickjs": {}}
 
         return opts
 
@@ -200,7 +202,7 @@ class MusicDownloader:
                 resp = requests.get(
                     high_res_url,
                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                    timeout=10,
+                    timeout=5,
                 )
                 if resp.status_code == 200 and len(resp.content) > 1000:
                     sq_bytes = _verify_and_square_image(resp.content)
@@ -233,7 +235,7 @@ class MusicDownloader:
                                 art_resp = requests.get(
                                     high_art_url,
                                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                                    timeout=10,
+                                    timeout=5,
                                 )
                                 if art_resp.status_code == 200 and len(art_resp.content) > 1000:
                                     sq_bytes = _verify_and_square_image(art_resp.content)
@@ -262,7 +264,7 @@ class MusicDownloader:
                         caa_resp = requests.get(
                             caa_url,
                             headers={"User-Agent": "NavidromeNotifier/2.0"},
-                            timeout=10,
+                            timeout=5,
                             allow_redirects=True,
                         )
                         if caa_resp.status_code == 200 and len(caa_resp.content) > 1000:

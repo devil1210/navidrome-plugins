@@ -678,10 +678,11 @@ class TestMusicDownloader(unittest.TestCase):
     def test_get_ydl_opts_album(self, tmp_path=Path("./test_album_opts")):
         opts = self.downloader.get_ydl_opts(tmp_path, is_playlist=True)
         self.assertEqual(opts["format"], "ba[ext=m4a]/ba")
-        self.assertTrue(opts["writethumbnail"])
+        self.assertFalse(opts["writethumbnail"])
         self.assertFalse(opts["allow_playlist_files"])
         self.assertTrue(any(p.get("key") == "FFmpegMetadata" for p in opts["postprocessors"]))
-        self.assertTrue(any(p.get("key") == "EmbedThumbnail" for p in opts["postprocessors"]))
+        self.assertFalse(any(p.get("key") == "EmbedThumbnail" for p in opts["postprocessors"]))
+        self.assertIn("js_runtimes", opts)
         self.assertIn("%(playlist_index)02d", opts["outtmpl"])
 
         if tmp_path.exists():
