@@ -1186,7 +1186,7 @@ def main():
                     }
                     fallback_markup = {
                         "inline_keyboard": [
-                            [{"text": f"⚡ Descargar Todas las Canciones ({tot_rem})", "callback_data": dl_cb}]
+                            [{"text": f"⚡ Descargar Todas las Canciones ({tot_rem})", "callback_data": dl_cb, "style": "success"}]
                         ]
                     }
                     listener.send_reply(
