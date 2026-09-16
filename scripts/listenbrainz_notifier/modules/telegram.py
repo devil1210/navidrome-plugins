@@ -874,6 +874,11 @@ class TelegramBotListener:
                 cq_msg_id = cq_msg.get("message_id", 0)
                 if self.on_add_disc_callback:
                     self.on_add_disc_callback(cq_chat_id, cq_thread_id, cq_msg_id, cq_id, cq_data)
+            elif cq_data.startswith("sync_dl:"):
+                arg = cq_data.split(":", 1)[1]
+                self.answer_callback_query(cq_id, text="⚡ Añadiendo canciones a la cola de descargas...")
+                if self.on_download_command:
+                    self.on_download_command(cq_chat_id, cq_thread_id, arg)
             elif cq_data.startswith("pcfg:"):
                 arg = cq_data.split(":", 1)[1]
                 cq_msg_id = cq_msg.get("message_id", 0)

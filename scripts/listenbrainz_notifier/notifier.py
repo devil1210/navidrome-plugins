@@ -1126,23 +1126,75 @@ def main():
                 remaining_albums = len(last_batch.get("albums", [])) if last_batch else 0
                 remaining_tracks = len(last_batch.get("tracks", [])) if last_batch else 0
                 tot_rem = remaining_albums + remaining_tracks
+                pls_label = f"{processed_count} playlists" if processed_count > 1 else f"{processed_count} playlist"
+
                 if tot_rem == 0:
-                    listener.send_reply(
-                        chat_id,
-                        f"✅ <b>Sincronización completada ({processed_count} playlists analizadas):</b>\n"
+                    summary_text = (
+                        f"✅ <b>Sincronización completada ({pls_label} analizadas):</b>\n"
                         f"• Todas las canciones faltantes ya se encontraban en tu biblioteca local y fueron auto-inyectadas a Navidrome.\n"
-                        f"• <i>No quedan álbumes ni temas pendientes por descargar.</i>",
-                        thread_id,
+                        f"• <i>No quedan álbumes ni temas pendientes por descargar.</i>"
                     )
+                    rich_summary = {
+                        "blocks": [
+                            {
+                                "type": "heading",
+                                "text": f"✅ Sincronización completada ({pls_label})",
+                                "size": 2,
+                            },
+                            {
+                                "type": "paragraph",
+                                "text": "Todas las canciones faltantes ya se encontraban en tu biblioteca local y fueron auto-inyectadas a Navidrome. No quedan álbumes ni temas pendientes por descargar.",
+                            },
+                        ]
+                    }
+                    listener.send_reply(chat_id, summary_text, thread_id, rich_message=rich_summary)
                 else:
                     tot_batches = last_batch.get("total_batches", 1) if last_batch else 1
-                    listener.send_reply(
-                        chat_id,
-                        f"✅ <b>Sincronización completada ({processed_count} playlists analizadas):</b>\n"
+                    dl_cb = f"sync_dl:{target_pls[:40]} all".strip() if target_pls else "sync_dl:all"
+
+                    summary_text = (
+                        f"✅ <b>Sincronización completada ({pls_label} analizadas):</b>\n"
                         f"• Se inyectaron temas existentes en Navidrome y se actualizaron comentarios.\n"
                         f"• Quedan <b>{tot_rem}</b> elementos pendientes (Lote {batch_num} de {tot_batches}).\n"
-                        f"• <i>Usa <code>/dl all</code> para descargarlos con el bot o cópialos a MediaHuman.</i>",
+                        f"• <i>Toca el botón abajo para descargarlos con el bot o cópialos a MediaHuman.</i>"
+                    )
+                    rich_summary = {
+                        "blocks": [
+                            {
+                                "type": "heading",
+                                "text": f"✅ Sincronización completada ({pls_label})",
+                                "size": 2,
+                            },
+                            {
+                                "type": "list",
+                                "items": [
+                                    {"blocks": [{"type": "paragraph", "text": "Se inyectaron temas existentes en Navidrome y se actualizaron comentarios."}]},
+                                    {"blocks": [{"type": "paragraph", "text": f"Quedan {tot_rem} elementos pendientes de descarga (Lote {batch_num} de {tot_batches})."}]},
+                                ],
+                            },
+                            {
+                                "type": "buttons",
+                                "buttons": [
+                                    {
+                                        "text": f"⚡ Descargar Todas las Canciones ({tot_rem})",
+                                        "callback_data": dl_cb,
+                                        "style": "success",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                    fallback_markup = {
+                        "inline_keyboard": [
+                            [{"text": f"⚡ Descargar Todas las Canciones ({tot_rem})", "callback_data": dl_cb}]
+                        ]
+                    }
+                    listener.send_reply(
+                        chat_id,
+                        summary_text,
                         thread_id,
+                        reply_markup=fallback_markup,
+                        rich_message=rich_summary,
                     )
 
         def on_limit_command(raw_args: str) -> str:
