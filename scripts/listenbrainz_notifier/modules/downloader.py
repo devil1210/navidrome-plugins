@@ -1966,23 +1966,27 @@ class DownloadQueue:
                     already_on_disk = True
 
             if not already_on_disk and self.downloader.library_dir:
-                artist_dir = self.downloader.library_dir / "General" / self.downloader.sanitize_name(album.artist_name)
-                if not artist_dir.is_dir():
-                    alt_artist_dir = self.downloader.library_dir / self.downloader.sanitize_name(album.artist_name)
-                    if alt_artist_dir.is_dir():
-                        artist_dir = alt_artist_dir
-
-                if artist_dir.is_dir():
-                    clean_target_album = self.downloader.sanitize_name(album.album_name).lower()
-                    for sub in artist_dir.iterdir():
-                        if sub.is_dir():
-                            sub_clean = re.sub(r"^\[\d{4}\]\s*-\s*", "", sub.name).strip().lower()
-                            if sub_clean == clean_target_album or sub.name.lower() == clean_target_album:
-                                is_valid, track_count, status_msg = self.downloader.verify_album_integrity(sub)
-                                if is_valid:
-                                    already_on_disk = True
-                                    disk_path_str = f"{self.win_dest}\\General\\{artist_dir.name}\\{sub.name}"
-                                    break
+                clean_target_album = self.downloader.sanitize_name(album.album_name).lower()
+                clean_target_artist = self.downloader.sanitize_name(album.artist_name)
+                candidate_categories = ["General", "J-Music", "Compilaciones", "Soundtracks/Worldwide", "Soundtracks/J-Music", ""]
+                for cat in candidate_categories:
+                    cat_dir = (self.downloader.library_dir / cat) if cat else self.downloader.library_dir
+                    if not cat_dir.is_dir():
+                        continue
+                    artist_dir = cat_dir / clean_target_artist
+                    if artist_dir.is_dir():
+                        for sub in artist_dir.iterdir():
+                            if sub.is_dir():
+                                sub_clean = re.sub(r"^\[\d{4}\]\s*-\s*", "", sub.name).strip().lower()
+                                if sub_clean == clean_target_album or sub.name.lower() == clean_target_album:
+                                    is_valid, track_count, status_msg = self.downloader.verify_album_integrity(sub)
+                                    if is_valid:
+                                        already_on_disk = True
+                                        cat_win = f"\\{cat}" if cat else ""
+                                        disk_path_str = f"{self.win_dest}{cat_win}\\{artist_dir.name}\\{sub.name}".replace("/", "\\")
+                                        break
+                    if already_on_disk:
+                        break
 
             if already_on_disk:
                 logger.info("El %s '%s' ya existe e íntegro en disco (%d pistas). Omitiendo.", item_type.lower(), album.album_name, track_count)
