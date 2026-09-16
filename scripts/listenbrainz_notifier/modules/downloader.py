@@ -57,8 +57,8 @@ class MusicDownloader:
 
     def __init__(
         self,
-        download_dir: str = "/media/music/downloads",
-        library_dir: Optional[str] = None,
+        download_dir: str = "/var/tmp/music_downloads",
+        library_dir: Optional[str] = "/media/music",
         uid: int = 1000,
         gid: int = 1000,
         cookies_path: Optional[str] = None,
@@ -68,7 +68,12 @@ class MusicDownloader:
         state_tracker: Optional[Any] = None,
     ):
         self.download_dir = Path(download_dir)
-        self.library_dir = Path(library_dir) if library_dir else self.download_dir.parent
+        if library_dir:
+            self.library_dir = Path(library_dir)
+        elif "/media" in str(self.download_dir):
+            self.library_dir = self.download_dir.parent
+        else:
+            self.library_dir = Path("/media/music")
         self.state_tracker = state_tracker
         self.uid = uid
         self.gid = gid
@@ -1111,7 +1116,25 @@ class MusicDownloader:
             if len(self.cookies_list) > 1:
                 self.rotate_cookie()
 
-            return True, str(target_folder)
+            final_folder = target_folder
+            if self.library_dir and self.download_dir.resolve() != self.library_dir.resolve():
+                dest_singles = self.library_dir / "downloads" / "_Singles"
+                if not dest_singles.parent.exists() and (self.library_dir / "_Singles").exists():
+                    dest_singles = self.library_dir / "_Singles"
+                dest_singles.mkdir(parents=True, exist_ok=True)
+                self._fix_permissions(dest_singles)
+                if new_track_file and new_track_file.is_file():
+                    dest_file = dest_singles / new_track_file.name
+                    shutil.move(str(new_track_file), str(dest_file))
+                    self._fix_permissions(dest_file)
+                    new_lrc = new_track_file.with_suffix(".lrc")
+                    if new_lrc.is_file():
+                        dest_lrc = dest_singles / new_lrc.name
+                        shutil.move(str(new_lrc), str(dest_lrc))
+                        self._fix_permissions(dest_lrc)
+                final_folder = dest_singles
+
+            return True, str(final_folder)
         except Exception as e:
             logger.error("Error descargando canción '%s': %s", track.title, e)
             return False, str(e)
@@ -1933,23 +1956,48 @@ class DownloadQueue:
                     )
                     continue
 
-            # 2. Check local disk integrity
+            # 2. Check local disk integrity (both in temp download folder and final library)
+            already_on_disk = False
+            disk_path_str = f"{self.win_dest}\\{folder_name}"
+            track_count = 0
             if target_folder.is_dir():
                 is_valid, track_count, status_msg = self.downloader.verify_album_integrity(target_folder)
                 if is_valid:
-                    logger.info("La carpeta del %s '%s' ya existe e íntegra (%d pistas). Omitiendo.", item_type.lower(), album.album_name, track_count)
-                    skipped_count += 1
-                    self._send_reply(
-                        chat_id,
-                        f"📁 <b>[{idx}/{total_albums}] {item_type} verificado en disco:</b>\n"
-                        f"• <b>{album.artist_name}</b> — <i>{album.album_name}</i>\n"
-                        f"• <b>Carpeta:</b> <code>{self.win_dest}\\{folder_name}</code>\n"
-                        f"✨ <i>Verificación de integridad exitosa ({track_count} pistas). Omitida la re-descarga.</i>",
-                        thread_id,
-                    )
-                    continue
-                else:
-                    logger.info("La carpeta del %s '%s' existe pero incompleta (%s). Completando con yt-dlp...", item_type.lower(), album.album_name, status_msg)
+                    already_on_disk = True
+
+            if not already_on_disk and self.downloader.library_dir:
+                artist_dir = self.downloader.library_dir / "General" / self.downloader.sanitize_name(album.artist_name)
+                if not artist_dir.is_dir():
+                    alt_artist_dir = self.downloader.library_dir / self.downloader.sanitize_name(album.artist_name)
+                    if alt_artist_dir.is_dir():
+                        artist_dir = alt_artist_dir
+
+                if artist_dir.is_dir():
+                    clean_target_album = self.downloader.sanitize_name(album.album_name).lower()
+                    for sub in artist_dir.iterdir():
+                        if sub.is_dir():
+                            sub_clean = re.sub(r"^\[\d{4}\]\s*-\s*", "", sub.name).strip().lower()
+                            if sub_clean == clean_target_album or sub.name.lower() == clean_target_album:
+                                is_valid, track_count, status_msg = self.downloader.verify_album_integrity(sub)
+                                if is_valid:
+                                    already_on_disk = True
+                                    disk_path_str = f"{self.win_dest}\\General\\{artist_dir.name}\\{sub.name}"
+                                    break
+
+            if already_on_disk:
+                logger.info("El %s '%s' ya existe e íntegro en disco (%d pistas). Omitiendo.", item_type.lower(), album.album_name, track_count)
+                skipped_count += 1
+                self._send_reply(
+                    chat_id,
+                    f"📁 <b>[{idx}/{total_albums}] {item_type} verificado en disco:</b>\n"
+                    f"• <b>{album.artist_name}</b> — <i>{album.album_name}</i>\n"
+                    f"• <b>Carpeta:</b> <code>{disk_path_str}</code>\n"
+                    f"✨ <i>Verificación de integridad exitosa ({track_count} pistas). Omitida la re-descarga.</i>",
+                    thread_id,
+                )
+                continue
+            elif target_folder.is_dir():
+                logger.info("La carpeta del %s '%s' existe pero incompleta (%s). Completando con yt-dlp...", item_type.lower(), album.album_name, status_msg)
 
             # 3. Real full download
             logger.info("Downloading %s %d/%d: '%s' by '%s'", item_type.lower(), idx, total_albums, album.album_name, album.artist_name)
@@ -2044,26 +2092,37 @@ class DownloadQueue:
                 )
                 continue
 
-            # 2. Check local disk in _Singles
-            singles_folder = self.downloader.download_dir / "_Singles"
-            if singles_folder.is_dir():
-                clean_track = self.downloader.sanitize_name(track.title).lower()
-                on_disk = any(
-                    clean_track in f.name.lower()
-                    for f in singles_folder.iterdir()
-                    if f.is_file() and f.suffix.lower() in ('.m4a', '.mp3', '.opus', '.webm', '.flac')
+            # 2. Check local disk in _Singles (both temp download folder and final library)
+            clean_track = self.downloader.sanitize_name(track.title).lower()
+            candidate_singles_folders = [self.downloader.download_dir / "_Singles"]
+            if self.downloader.library_dir:
+                candidate_singles_folders.extend([
+                    self.downloader.library_dir / "downloads" / "_Singles",
+                    self.downloader.library_dir / "_Singles",
+                ])
+
+            on_disk = False
+            for s_folder in candidate_singles_folders:
+                if s_folder.is_dir():
+                    if any(
+                        clean_track in f.name.lower()
+                        for f in s_folder.iterdir()
+                        if f.is_file() and f.suffix.lower() in ('.m4a', '.mp3', '.opus', '.webm', '.flac')
+                    ):
+                        on_disk = True
+                        break
+
+            if on_disk:
+                skipped_count += 1
+                logger.info("La pista '%s' ya existe en _Singles en disco. Omitiendo.", track.title)
+                self._send_reply(
+                    chat_id,
+                    f"📁 <b>[Pista {t_idx}/{total_tracks}] Canción ya en disco:</b>\n"
+                    f"• <b>{track.artist}</b> — <i>{track.title}</i>\n"
+                    f"✨ <i>Ya disponible en <code>{self.win_dest}\\downloads\\_Singles</code>. Se omitió la re-descarga.</i>",
+                    thread_id,
                 )
-                if on_disk:
-                    skipped_count += 1
-                    logger.info("La pista '%s' ya existe en _Singles en disco. Omitiendo.", track.title)
-                    self._send_reply(
-                        chat_id,
-                        f"📁 <b>[Pista {t_idx}/{total_tracks}] Canción ya en disco:</b>\n"
-                        f"• <b>{track.artist}</b> — <i>{track.title}</i>\n"
-                        f"✨ <i>Ya disponible en <code>{self.win_dest}\\_Singles</code>. Se omitió la re-descarga.</i>",
-                        thread_id,
-                    )
-                    continue
+                continue
 
             # 3. Real track download
             success, err = self.downloader.download_track(track)

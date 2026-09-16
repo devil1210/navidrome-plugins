@@ -243,7 +243,8 @@ def main():
             return "M:" + s[len("media"):]
         return s
 
-    download_music_dir = os.getenv("DOWNLOAD_MUSIC_DIR", "/media/music/downloads")
+    download_music_dir = os.getenv("DOWNLOAD_MUSIC_DIR", "/var/tmp/music_downloads")
+    library_music_dir = os.getenv("LIBRARY_MUSIC_DIR", "/media/music")
     download_uid = int(os.getenv("DOWNLOAD_UID", "1000"))
     download_gid = int(os.getenv("DOWNLOAD_GID", "1000"))
     ytdl_cookies_path = os.getenv("YTDL_COOKIES_PATH", None) or None
@@ -251,6 +252,7 @@ def main():
         for candidate in [
             script_dir / "cookies.txt",
             Path("/media/downloads/cookies.txt"),
+            Path("/media/music/downloads/cookies.txt"),
             Path(download_music_dir).parent / "cookies.txt",
             Path(download_music_dir) / "cookies.txt",
         ]:
@@ -304,7 +306,16 @@ def main():
         found_cookies: List[str] = []
         parent_dir = Path(download_music_dir).parent
         cookies_folder = parent_dir / "cookies"
-        for d in [cookies_folder, parent_dir, Path(download_music_dir), script_dir, Path("/media/downloads"), Path("/media/downloads/cookies")]:
+        for d in [
+            cookies_folder,
+            parent_dir,
+            Path(download_music_dir),
+            script_dir,
+            Path("/media/downloads"),
+            Path("/media/downloads/cookies"),
+            Path("/media/music/cookies"),
+            Path("/media/music/downloads"),
+        ]:
             if d.is_dir():
                 for f in sorted(d.glob("cookie*.txt")):
                     if f.is_file() and str(f) not in found_cookies:
@@ -315,18 +326,19 @@ def main():
 
         downloader = MusicDownloader(
             download_dir=download_music_dir,
+            library_dir=library_music_dir,
             uid=download_uid,
             gid=download_gid,
             cookies_list=found_cookies,
             state_tracker=state_tracker,
         )
-        win_dest = to_windows_path(download_music_dir)
+        win_dest = to_windows_path(library_music_dir)
         universal_resolver = UniversalResolver()
 
         active_cookie = ytdl_cookies_path or (found_cookies[0] if found_cookies else None)
         discoverer = YouTubeMusicDiscoverer(
             cookie_file=active_cookie,
-            music_dir=download_music_dir,
+            music_dir=library_music_dir,
         )
 
         download_queue = DownloadQueue(
@@ -1152,7 +1164,7 @@ def main():
             curr_limit = state_tracker.get_limit(default_limit=default_max_albums)
             limit_str = f"{curr_limit} álbumes" if curr_limit > 0 else "Sin límite"
             dl_status = download_queue.get_status()
-            win_dest = to_windows_path(download_music_dir)
+            win_dest = to_windows_path(library_music_dir)
             ytm_status = f"Conectado ({discoverer.account_name})" if discoverer.is_authenticated else "Modo público"
             return (
                 "🤖 <b>ListenBrainz Navidrome Notifier Bot</b>\n\n"
@@ -1161,7 +1173,8 @@ def main():
                 f"• <b>YouTube Music:</b> <code>{ytm_status}</code>\n"
                 f"• <b>Límite por lote:</b> <code>{limit_str}</code> (modificar con <code>/limit [N]</code>)\n"
                 f"• <b>Motor de descarga:</b> <code>{dl_status}</code>\n"
-                f"• <b>Ruta destino:</b> <code>{download_music_dir}</code> ({win_dest})\n"
+                f"• <b>Caché temporal (SSD):</b> <code>{download_music_dir}</code>\n"
+                f"• <b>Biblioteca final (HDD):</b> <code>{library_music_dir}</code> ({win_dest})\n"
                 f"• <b>Última comprobación:</b> <code>{last_sync}</code>\n"
                 f"• <b>Intervalo programado:</b> cada {daemon_interval} min\n\n"
                 "<i>Envía <code>/sync</code> para lotes, <code>/descubrir</code> para recomendaciones, <code>/novedades</code> para estrenos o <code>/add</code> para demanda.</i>"
