@@ -1121,6 +1121,29 @@ def main():
                     f"✅ <b>Todo al día:</b> La playlist <code>{', '.join(query_names)}</code> no tiene canciones faltantes registradas en sus comentarios.",
                     thread_id,
                 )
+            else:
+                last_batch = state_tracker.get_last_batch()
+                remaining_albums = len(last_batch.get("albums", [])) if last_batch else 0
+                remaining_tracks = len(last_batch.get("tracks", [])) if last_batch else 0
+                tot_rem = remaining_albums + remaining_tracks
+                if tot_rem == 0:
+                    listener.send_reply(
+                        chat_id,
+                        f"✅ <b>Sincronización completada ({processed_count} playlists analizadas):</b>\n"
+                        f"• Todas las canciones faltantes ya se encontraban en tu biblioteca local y fueron auto-inyectadas a Navidrome.\n"
+                        f"• <i>No quedan álbumes ni temas pendientes por descargar.</i>",
+                        thread_id,
+                    )
+                else:
+                    tot_batches = last_batch.get("total_batches", 1) if last_batch else 1
+                    listener.send_reply(
+                        chat_id,
+                        f"✅ <b>Sincronización completada ({processed_count} playlists analizadas):</b>\n"
+                        f"• Se inyectaron temas existentes en Navidrome y se actualizaron comentarios.\n"
+                        f"• Quedan <b>{tot_rem}</b> elementos pendientes (Lote {batch_num} de {tot_batches}).\n"
+                        f"• <i>Usa <code>/dl all</code> para descargarlos con el bot o cópialos a MediaHuman.</i>",
+                        thread_id,
+                    )
 
         def on_limit_command(raw_args: str) -> str:
             args_str = raw_args.strip()
