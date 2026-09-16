@@ -500,45 +500,78 @@ class TelegramSender:
         file_name = f"{clean_name}{batch_suffix}_MediaHuman.txt"
 
         for target in self.targets:
-            for idx, html_chunk in enumerate(messages, 1):
-                # Try sendRichMessage first
-                rich_payload = {
-                    "chat_id": target.chat_id,
-                    "rich_message": json.dumps({"html": html_chunk}),
-                }
-                if target.thread_id:
-                    rich_payload["message_thread_id"] = target.thread_id
-
-                try:
-                    resp = requests.post(rich_url, data=rich_payload, timeout=15)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if not data.get("ok"):
-                        raise Exception(f"sendRichMessage error: {data.get('description')}")
-                    logger.info("Telegram RichMessage [%d/%d] sent successfully to chat %s!", idx, len(messages), target.chat_id)
-                except Exception as e:
-                    logger.warning("sendRichMessage failed (%s). Falling back to sendMessage...", e)
-                    # Fallback to standard sendMessage using expandable blockquote
-                    batch_title = f" (Lote {result.batch_number}/{result.total_batches})" if result.total_batches > 1 else ""
-                    fallback_text = (
-                        f"🎧 <b>ListenBrainz — {self._escape_html(playlist_name)}{batch_title}</b>\n\n"
-                        f"<blockquote expandable>\n" + "\n".join(result.all_urls) + "\n</blockquote>"
-                    )
-                    fallback_payload = {
+            use_rich = self.quote_style in ("rich", "richmessage")
+            if use_rich:
+                for idx, html_chunk in enumerate(messages, 1):
+                    rich_payload = {
                         "chat_id": target.chat_id,
-                        "text": fallback_text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
+                        "rich_message": json.dumps({"html": html_chunk}),
                     }
                     if target.thread_id:
-                        fallback_payload["message_thread_id"] = target.thread_id
+                        rich_payload["message_thread_id"] = target.thread_id
+
                     try:
-                        f_resp = requests.post(fallback_url, json=fallback_payload, timeout=15)
-                        f_resp.raise_for_status()
-                        logger.info("Telegram fallback message sent successfully to chat %s!", target.chat_id)
-                    except Exception as fe:
-                        logger.error("Failed to send fallback message to chat %s: %s", target.chat_id, fe)
-                        all_success = False
+                        resp = requests.post(rich_url, data=rich_payload, timeout=15)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        if not data.get("ok"):
+                            raise Exception(f"sendRichMessage error: {data.get('description')}")
+                        logger.info("Telegram RichMessage [%d/%d] sent successfully to chat %s!", idx, len(messages), target.chat_id)
+                    except Exception as e:
+                        logger.warning("sendRichMessage failed (%s). Falling back to sendMessage...", e)
+                        use_rich = False
+                        break
+                    time.sleep(0.5)
+
+            if not use_rich:
+                batch_title = f" (Lote {result.batch_number}/{result.total_batches})" if result.total_batches > 1 else ""
+                album_items = []
+                for alb in result.albums:
+                    s_art = self._escape_html(alb.artist_name)
+                    s_alb = self._escape_html(alb.album_name)
+                    trks_count = len(alb.tracks)
+                    s_trks = ", ".join([f"<i>{self._escape_html(t)}</i>" for t in alb.tracks[:3]])
+                    if trks_count > 3:
+                        s_trks += f" y {trks_count - 3} más..."
+                    if getattr(alb, "is_partial", False):
+                        album_items.append(f"• 💿 <b>{s_art}</b> — <b>{s_alb}</b> <i>(Parcial: falta {s_trks})</i>")
+                    else:
+                        album_items.append(f"• 💿 <b>{s_art}</b> — <b>{s_alb}</b> ({s_trks})")
+                for trk in result.tracks:
+                    s_art = self._escape_html(trk.artist)
+                    s_title = self._escape_html(trk.title)
+                    album_items.append(f"• 🎵 <b>{s_art}</b> — <i>{s_title}</i> [Single]")
+
+                detail_block = "\n".join(album_items[:15])
+                if len(album_items) > 15:
+                    detail_block += f"\n• <i>... y {len(album_items) - 15} más</i>"
+
+                msg_text = (
+                    f"🎧 <b>ListenBrainz — {self._escape_html(playlist_name)}{batch_title}</b>\n"
+                    f"<i>Canciones faltantes en tu biblioteca de Navidrome</i>\n\n"
+                    f"💿 <b>Álbumes prioritarios ({len(result.albums)} en este lote):</b>\n"
+                    f"{detail_block}\n\n"
+                    f"📥 <b>Enlaces MediaHuman ({result.total_links}):</b>\n"
+                    f"<blockquote expandable>\n" + "\n".join(result.all_urls) + "\n</blockquote>"
+                )
+                if result.total_batches > 1 and result.batch_number < result.total_batches:
+                    msg_text += f"\n\n💡 <i>Siguiente lote:</i> <code>/sync {self._escape_html(playlist_name)} lote {result.batch_number + 1}</code>"
+
+                fallback_payload = {
+                    "chat_id": target.chat_id,
+                    "text": msg_text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                }
+                if target.thread_id:
+                    fallback_payload["message_thread_id"] = target.thread_id
+                try:
+                    f_resp = requests.post(fallback_url, json=fallback_payload, timeout=15)
+                    f_resp.raise_for_status()
+                    logger.info("Telegram notification message sent successfully to chat %s!", target.chat_id)
+                except Exception as fe:
+                    logger.error("Failed to send fallback message to chat %s: %s", target.chat_id, fe)
+                    all_success = False
 
                 time.sleep(0.5)
 
