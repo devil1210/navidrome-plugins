@@ -335,7 +335,6 @@ class SystemHandler:
     def on_incompletos_command(self, chat_id: str, thread_id: Optional[str]):
         if not self.listener:
             return
-        from ..modules.auditor import IncompleteAlbumAuditor
         auditor = IncompleteAlbumAuditor(
             navidrome=self.navidrome,
             downloader=getattr(self.download_queue, "downloader", None),

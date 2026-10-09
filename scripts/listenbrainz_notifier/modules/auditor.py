@@ -207,12 +207,6 @@ class IncompleteAlbumAuditor:
                 if has_full_duplicate:
                     continue
 
-            # Check if already complete on disk
-            if self._is_album_complete_on_disk(artist_name, alb_name, year=this_year):
-                if self.state_tracker:
-                    self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
-                continue
-
             # Fetch tracks from Navidrome
             nav_tracks = self.navidrome.get_album_tracks(alb_id)
             if not nav_tracks:

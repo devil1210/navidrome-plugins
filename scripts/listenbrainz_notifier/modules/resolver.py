@@ -276,6 +276,19 @@ class UniversalResolver:
         self.yt = yt or yt_cls()
         self._album_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._lock = threading.Lock()
+        self._inner_yt_resolver: Optional[YouTubeMusicResolver] = None
+
+    def resolve_album_by_name(self, album_name: str, artist_name: str) -> Optional[ResolvedAlbum]:
+        """Resolves an album title and artist name to an official YouTube Music playlist URL."""
+        if self._inner_yt_resolver is None:
+            self._inner_yt_resolver = YouTubeMusicResolver()
+        return self._inner_yt_resolver.resolve_album_by_name(album_name, artist_name)
+
+    def resolve_track_to_album(self, track_title: str, artist_name: str) -> Optional[ResolvedAlbum]:
+        """Resolves a single track title and artist name to its official studio album."""
+        if self._inner_yt_resolver is None:
+            self._inner_yt_resolver = YouTubeMusicResolver()
+        return self._inner_yt_resolver.resolve_track_to_album(track_title, artist_name)
 
     def _get_album_details(self, browse_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:

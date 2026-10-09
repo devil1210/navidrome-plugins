@@ -381,7 +381,10 @@ class MusicDownloader:
 
             final_folder = target_folder
             try:
-                from ..picard_engine import PicardEngine
+                try:
+                    from ..picard_engine import PicardEngine
+                except (ImportError, ValueError):
+                    from modules.picard_engine import PicardEngine
                 plugins_config = self.state_tracker.get_picard_plugins() if self.state_tracker else None
                 final_folder = PicardEngine.process_and_relocate_album(
                     temp_album_dir=target_folder,
@@ -504,7 +507,10 @@ class MusicDownloader:
 
             final_folder = target_folder
             try:
-                from ..picard_engine import PicardEngine
+                try:
+                    from ..picard_engine import PicardEngine
+                except (ImportError, ValueError):
+                    from modules.picard_engine import PicardEngine
                 plugins_config = self.state_tracker.get_picard_plugins() if self.state_tracker else None
                 final_folder = PicardEngine.process_and_relocate_album(
                     temp_album_dir=target_folder,

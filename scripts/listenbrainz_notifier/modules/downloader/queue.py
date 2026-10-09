@@ -320,7 +320,10 @@ class DownloadQueue:
             return
 
         try:
-            from ..parser import TrackParser
+            try:
+                from ..parser import TrackParser
+            except (ImportError, ValueError):
+                from modules.parser import TrackParser
             pls = self.navidrome.get_playlists()
             if not isinstance(pls, list):
                 return
