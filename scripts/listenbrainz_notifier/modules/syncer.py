@@ -42,7 +42,7 @@ def norm_title(s: str) -> str:
     clean = clean.replace("’", "'").replace("`", "'")
     clean = clean.replace("ō", "o").replace("ū", "u").replace("ā", "a").replace("ē", "e").replace("ī", "i")
     clean = clean.replace("ou", "o").replace("uu", "u")
-    clean = re.sub(r"\s*-\s*(english|japanese|spanish|single|album|radio|edit|ver|version|remaster|remastered).*", "", clean, flags=re.I).strip()
+    clean = re.sub(r"\s*-\s*(english|japanese|spanish|single|album|radio|edit|ver|version|remaster|remastered|live|acoustic|instrumental|bonus|feat|ft|from\s+the).*", "", clean, flags=re.I).strip()
     return re.sub(r"[^\w\s]", "", clean.lower()).strip()
 
 
@@ -75,17 +75,22 @@ def titles_match(t1: str, t2: str) -> bool:
         return True
     c1 = n1.replace(" ", "")
     c2 = n2.replace(" ", "")
-    if len(c1) >= 4 and len(c2) >= 4 and (c1 in c2 or c2 in c1):
-        return True
-    if len(c1) >= 5 and len(c2) >= 5 and (c1[:5] in c2 or c2[:5] in c1):
-        return True
-    # Romaji substring matching (e.g. のびしろ -> nobishiro vs Nobishiro - from the FIRST TAKE)
-    cr1 = r1.replace(" ", "")
-    cr2 = r2.replace(" ", "")
-    if len(cr1) >= 4 and len(cr2) >= 4 and (cr1 in cr2 or cr2 in cr1):
-        return True
-    if len(cr1) >= 5 and len(cr2) >= 5 and (cr1[:5] in cr2 or cr2[:5] in c1):
-        return True
+    # Prefix / Substring matching only if one whole title is a prefix of the other with sufficient length
+    if len(c1) >= 6 and len(c2) >= 6:
+        if c2.startswith(c1) or c1.startswith(c2):
+            return True
+    # Romaji prefix matching (e.g. のびしろ -> nobishiro vs Nobishiro - from the FIRST TAKE)
+    cr1 = r1.replace(" ", "") if r1 else ""
+    cr2 = r2.replace(" ", "") if r2 else ""
+    if cr1 and cr2 and len(cr1) >= 6 and len(cr2) >= 6:
+        if cr2.startswith(cr1) or cr1.startswith(cr2):
+            return True
+    if cr1 and len(cr1) >= 6 and len(c2) >= 6:
+        if c2.startswith(cr1) or cr1.startswith(c2):
+            return True
+    if cr2 and len(cr2) >= 6 and len(c1) >= 6:
+        if c1.startswith(cr2) or cr2.startswith(c1):
+            return True
     return False
 
 

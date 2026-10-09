@@ -2800,9 +2800,13 @@ class TestDiscardAndIgnoreFeature(unittest.TestCase):
         # Line edition variations
         self.assertTrue(titles_match("Photograph", "Photograph - Live"))
         self.assertTrue(titles_match("Photograph (Deluxe)", "Photograph"))
-        # Unrelated titles must not match
+        self.assertTrue(titles_match("19. Popurri de Banda", "Popurri de Banda"))
+        # Unrelated titles must not match even if they share common prefixes
         self.assertFalse(titles_match("Photograph", "Shape of You"))
         self.assertFalse(titles_match("のびしろ", "Bling-Bang-Bang-Born"))
+        self.assertFalse(titles_match("Popurri de Banda", "Popurri de Paquita"))
+        self.assertFalse(titles_match("Canción 1", "Canción 2"))
+        self.assertFalse(titles_match("Intro - Part 1", "Intro - Part 2"))
 
     @patch("modules.syncer.YouTubeMusicResolver")
     def test_syncer_homonymous_album_resolution_creepy_nuts(self, mock_resolver_cls):
