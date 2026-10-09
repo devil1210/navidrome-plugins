@@ -372,12 +372,12 @@ def process_download_job(queue: Any, job: DownloadJob):
         already_on_disk = False
         disk_path_str = f"{queue.win_dest}\\{folder_name}"
         track_count = 0
-        if target_folder.is_dir():
-            is_valid, track_count, status_msg = queue.downloader.verify_album_integrity(target_folder)
-            if is_valid and (is_single or track_count >= 5):
-                already_on_disk = True
+        existing_disk_folder = None
 
-        if not already_on_disk and queue.downloader.library_dir:
+        if target_folder.is_dir():
+            existing_disk_folder = target_folder
+
+        if not existing_disk_folder and queue.downloader.library_dir:
             clean_target_album = queue.downloader.sanitize_name(album.album_name).lower()
             clean_target_artist = queue.downloader.sanitize_name(album.artist_name)
             candidate_categories = ["General", "J-Music", "Compilaciones", "Soundtracks/Worldwide", "Soundtracks/J-Music", ""]
@@ -391,14 +391,146 @@ def process_download_job(queue: Any, job: DownloadJob):
                         if sub.is_dir():
                             sub_clean = re.sub(r"^\[\d{4}\]\s*-\s*", "", sub.name).strip().lower()
                             if sub_clean == clean_target_album or sub.name.lower() == clean_target_album:
-                                is_valid, track_count, status_msg = queue.downloader.verify_album_integrity(sub)
-                                if is_valid and (is_single or track_count >= 5):
-                                    already_on_disk = True
-                                    cat_win = f"\\{cat}" if cat else ""
-                                    disk_path_str = f"{queue.win_dest}{cat_win}\\{artist_dir.name}\\{sub.name}".replace("/", "\\")
-                                    break
-                if already_on_disk:
+                                existing_disk_folder = sub
+                                cat_win = f"\\{cat}" if cat else ""
+                                disk_path_str = f"{queue.win_dest}{cat_win}\\{artist_dir.name}\\{sub.name}".replace("/", "\\")
+                                break
+                if existing_disk_folder:
                     break
+
+        if existing_disk_folder:
+            is_valid, track_count, status_msg = queue.downloader.verify_album_integrity(existing_disk_folder)
+
+            disk_files = [
+                f for f in existing_disk_folder.iterdir()
+                if f.is_file() and f.suffix.lower() in ('.m4a', '.mp3', '.opus', '.webm', '.flac')
+            ]
+            disk_track_nums = []
+            for df in disk_files:
+                m_num = re.match(r"^(\d{1,3})\s*[\.\-_]", df.name)
+                if m_num:
+                    disk_track_nums.append(int(m_num.group(1)))
+
+            disk_has_gaps = False
+            if disk_track_nums and len(disk_track_nums) >= 2:
+                if min(disk_track_nums) > 1 or len(set(range(min(disk_track_nums), max(disk_track_nums) + 1))) > len(disk_track_nums):
+                    disk_has_gaps = True
+            elif disk_track_nums and len(disk_track_nums) == 1 and disk_track_nums[0] > 1:
+                disk_has_gaps = True
+
+            official_tracks_disk = []
+            if not is_single:
+                try:
+                    official_tracks_disk = queue.downloader.get_album_tracklist(album)
+                except Exception:
+                    official_tracks_disk = []
+            if not official_tracks_disk:
+                official_tracks_disk = getattr(album, "tracks", []) or []
+
+            if official_tracks_disk:
+                missing_disk_indices = []
+                for t_idx, trk in enumerate(official_tracks_disk, 1):
+                    track_name = trk.get("title", "") if isinstance(trk, dict) else str(trk)
+                    idx_val = trk.get("index", t_idx) if isinstance(trk, dict) else t_idx
+                    found_df = False
+                    for df in disk_files:
+                        m_num = re.match(r"^(\d{1,3})\s*[\.\-_]", df.name)
+                        if m_num and int(m_num.group(1)) == idx_val:
+                            found_df = True
+                            break
+                        if titles_match(track_name, df.stem):
+                            found_df = True
+                            break
+                    if not found_df:
+                        missing_disk_indices.append(idx_val)
+
+                if len(missing_disk_indices) == 0 and is_valid and len(disk_files) > 0:
+                    already_on_disk = True
+                elif len(disk_files) > 0 and len(missing_disk_indices) < len(official_tracks_disk):
+                    logger.info(
+                        "El %s '%s' está parcial en disco (%d/%d pistas). Descargando %d pistas faltantes...",
+                        item_type.lower(), album.album_name, len(official_tracks_disk) - len(missing_disk_indices), len(official_tracks_disk), len(missing_disk_indices)
+                    )
+                    missing_preview = ", ".join(f"#{i}" for i in missing_disk_indices[:10])
+                    if len(missing_disk_indices) > 10:
+                        missing_preview += f" y {len(missing_disk_indices) - 10} más"
+
+                    queue._send_reply(
+                        chat_id,
+                        f"📁 <b>[{idx}/{total_albums}] {item_type} parcial en disco:</b>\n"
+                        f"• <b>{album.artist_name}</b> — <i>{album.album_name}</i>\n"
+                        f"📥 <b>Descargando {len(missing_disk_indices)} pistas faltantes:</b>\n"
+                        f"• <i>{missing_preview}</i>\n"
+                        f"• <b>Carpeta:</b> <code>{disk_path_str}</code>",
+                        descargas_thread_id,
+                    )
+
+                    streamer = AlbumProgressStreamer(
+                        queue=queue,
+                        chat_id=chat_id,
+                        thread_id=descargas_thread_id,
+                        album=album,
+                        tracks=official_tracks_disk,
+                        dest_folder=f"{queue.win_dest}\\{folder_name}",
+                        missing_indices=set(missing_disk_indices),
+                        initial_msg_id=(job.status_msg_id if is_single_release else None),
+                    )
+                    streamer.start()
+                    queue.downloader.progress_callback = streamer.handle_progress
+                    try:
+                        ok, err = queue.downloader.download_album_tracks(album, missing_disk_indices)
+                    finally:
+                        queue.downloader.progress_callback = None
+                        streamer.finish(success=ok, final_note=str(err) if not ok else "")
+
+                    if ok:
+                        ok_count += 1
+                        queue.consecutive_block_errors = 0
+                        if getattr(queue, "state_tracker", None):
+                            queue.state_tracker.mark_audited_complete(album.album_name, album.artist_name)
+                        actual_folder = Path(err) if (err and Path(err).is_dir()) else existing_disk_folder
+                        queue._send_album_rich_notification(chat_id, anadidos_thread_id, album, actual_folder)
+                        if not is_single_release and idx <= len(batch_items):
+                            batch_items[idx - 1]["status"] = "done"
+                            _update_batch_progress(batch_items[idx - 1]["name"])
+                        queue._send_reply(
+                            chat_id,
+                            f"📥 <b>[{idx}/{total_albums}] Pistas faltantes descargadas con éxito:</b>\n"
+                            f"• <b>{album.artist_name}</b> — <i>{album.album_name}</i>\n"
+                            f"• Descargadas <b>{len(missing_disk_indices)}</b> pistas faltantes.",
+                            descargas_thread_id,
+                        )
+                    else:
+                        failed_count += 1
+                        failed_albums.append(album)
+                        if getattr(queue, "state_tracker", None):
+                            queue.state_tracker.record_failed_item(
+                                name=album.album_name,
+                                artist=album.artist_name,
+                                url=album.url,
+                                reason=str(err),
+                            )
+                        err_str = str(err).lower()
+                        if any(w in err_str for w in ["bloqueo temporal", "bot", "sign in", "confirm you’re not a bot", "video unavailable", "rate-limited"]):
+                            queue.consecutive_block_errors += 1
+                        else:
+                            queue.consecutive_block_errors = 0
+
+                        logger.error("Error descargando pistas faltantes de '%s': %s", album.album_name, err)
+                        if not is_single_release and idx <= len(batch_items):
+                            batch_items[idx - 1]["status"] = "failed"
+                            _update_batch_progress(batch_items[idx - 1]["name"])
+                            queue._send_reply(
+                                chat_id,
+                                f"⚠️ <b>[{idx}/{total_albums}] Error descargando pistas faltantes:</b>\n"
+                                f"• <b>{album.artist_name}</b> — <i>{album.album_name}</i>\n"
+                                f"• <i>{err}</i>",
+                                descargas_thread_id,
+                            )
+                    continue
+            else:
+                if is_valid and (is_single or (not disk_has_gaps and track_count >= 1)):
+                    already_on_disk = True
 
         if already_on_disk:
             logger.info("El %s '%s' ya existe e íntegro en disco (%d pistas). Omitiendo.", item_type.lower(), album.album_name, track_count)
