@@ -234,6 +234,15 @@ class FolderConsolidator:
                             pass
 
                 if moved_files_total > 0:
+                    if not dry_run:
+                        try:
+                            try:
+                                from .picard_engine import PicardEngine
+                            except (ImportError, ValueError):
+                                from modules.picard_engine import PicardEngine
+                            PicardEngine.harmonize_folder_tags(canonical)
+                        except Exception:
+                            pass
                     consolidated_targets.add(canonical)
                     results.append({
                         "album": canonical.name,

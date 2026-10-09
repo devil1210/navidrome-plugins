@@ -745,6 +745,94 @@ class PicardEngine:
         return None
 
     @classmethod
+    def harmonize_folder_tags(cls, folder_path: Path):
+        """
+        Ensures all .m4a audio tracks in an album folder share identical Album,
+        Album Artist, Release Year, and MusicBrainz IDs to prevent split cards in Navidrome.
+        """
+        if MP4 is None or not folder_path.is_dir():
+            return
+
+        audio_files = [f for f in folder_path.iterdir() if f.is_file() and f.suffix.lower() == ".m4a"]
+        if not audio_files:
+            return
+
+        alb_tag = None
+        day_tag = None
+        aart_tag = None
+        mb_alb_id = None
+        mb_rel_group = None
+        mb_art_id = None
+        mb_aart_id = None
+
+        # 1. Discover dominant / existing canonical tags across tracks
+        for f in audio_files:
+            try:
+                m = MP4(str(f))
+                if not m.tags:
+                    continue
+                if not alb_tag and "©alb" in m.tags and m.tags["©alb"]:
+                    alb_tag = m.tags["©alb"]
+                if not day_tag and "©day" in m.tags and m.tags["©day"]:
+                    day_tag = m.tags["©day"]
+                if not aart_tag and "aART" in m.tags and m.tags["aART"]:
+                    aart_tag = m.tags["aART"]
+                if not mb_alb_id and "----:com.apple.iTunes:MusicBrainz Album Id" in m.tags:
+                    mb_alb_id = m.tags["----:com.apple.iTunes:MusicBrainz Album Id"]
+                if not mb_rel_group and "----:com.apple.iTunes:MusicBrainz Release Group Id" in m.tags:
+                    mb_rel_group = m.tags["----:com.apple.iTunes:MusicBrainz Release Group Id"]
+                if not mb_art_id and "----:com.apple.iTunes:MusicBrainz Artist Id" in m.tags:
+                    mb_art_id = m.tags["----:com.apple.iTunes:MusicBrainz Artist Id"]
+                if not mb_aart_id and "----:com.apple.iTunes:MusicBrainz Album Artist Id" in m.tags:
+                    mb_aart_id = m.tags["----:com.apple.iTunes:MusicBrainz Album Artist Id"]
+            except Exception:
+                pass
+
+        total_tracks = len(audio_files)
+
+        # 2. Homogenize all audio tracks in folder
+        for f in audio_files:
+            try:
+                m = MP4(str(f))
+                if not m.tags:
+                    continue
+                changed = False
+                if alb_tag and m.tags.get("©alb") != alb_tag:
+                    m.tags["©alb"] = alb_tag
+                    changed = True
+                if day_tag and m.tags.get("©day") != day_tag:
+                    m.tags["©day"] = day_tag
+                    changed = True
+                if aart_tag and m.tags.get("aART") != aart_tag:
+                    m.tags["aART"] = aart_tag
+                    changed = True
+                if mb_alb_id and m.tags.get("----:com.apple.iTunes:MusicBrainz Album Id") != mb_alb_id:
+                    m.tags["----:com.apple.iTunes:MusicBrainz Album Id"] = mb_alb_id
+                    changed = True
+                if mb_rel_group and m.tags.get("----:com.apple.iTunes:MusicBrainz Release Group Id") != mb_rel_group:
+                    m.tags["----:com.apple.iTunes:MusicBrainz Release Group Id"] = mb_rel_group
+                    changed = True
+                if mb_art_id and m.tags.get("----:com.apple.iTunes:MusicBrainz Artist Id") != mb_art_id:
+                    m.tags["----:com.apple.iTunes:MusicBrainz Artist Id"] = mb_art_id
+                    changed = True
+                if mb_aart_id and m.tags.get("----:com.apple.iTunes:MusicBrainz Album Artist Id") != mb_aart_id:
+                    m.tags["----:com.apple.iTunes:MusicBrainz Album Artist Id"] = mb_aart_id
+                    changed = True
+
+                # Update total track count in trkn tag if present
+                cur_trkn = m.tags.get("trkn", [(0, 0)])
+                if cur_trkn and isinstance(cur_trkn, list) and cur_trkn[0]:
+                    trk_no = cur_trkn[0][0]
+                    if trk_no > 0 and cur_trkn[0][1] != total_tracks:
+                        m.tags["trkn"] = [(trk_no, total_tracks)]
+                        changed = True
+
+                if changed:
+                    m.save()
+            except Exception:
+                pass
+
+    @classmethod
     def process_and_relocate_album(
         cls,
         temp_album_dir: Path,
@@ -1019,20 +1107,10 @@ class PicardEngine:
                                     pass
                 shutil.move(str(item), str(target_dest_file))
 
-                # Align MP4 tags with existing album in folder so Navidrome doesn't split the album
-                if target_dest_file.suffix.lower() == ".m4a" and MP4 is not None and (existing_alb_tag or existing_day_tag):
-                    try:
-                        m_target = MP4(str(target_dest_file))
-                        if m_target.tags:
-                            if existing_alb_tag:
-                                m_target.tags["©alb"] = existing_alb_tag
-                            if existing_day_tag:
-                                m_target.tags["©day"] = existing_day_tag
-                            m_target.save()
-                    except Exception:
-                        pass
-
             shutil.rmtree(str(temp_album_dir), ignore_errors=True)
+
+            # Homogenize MP4 and MusicBrainz tags across all tracks in folder so Navidrome unifies them into 1 card
+            cls.harmonize_folder_tags(dest_dir)
 
             try:
                 if hasattr(os, "chown") and uid and gid:
