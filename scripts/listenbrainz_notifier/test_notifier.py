@@ -3245,8 +3245,8 @@ class TestPlaylistAligner(unittest.TestCase):
             {"id": "alb_2", "name": "_Singles", "artist": "Various Artists"},
             {"id": "alb_3", "name": "Blocked Album", "artist": "Blocked Artist"},
         ]
-        # alb_1 has 1 song in Navidrome
-        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1}]
+        # alb_1 has 1 song in Navidrome out of 37 total tracks
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1, "totalTracks": 37}]
 
         tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
         tracker.record_failed_item("Blocked Album", "Blocked Artist", reason="Video unavailable")
@@ -3269,7 +3269,7 @@ class TestPlaylistAligner(unittest.TestCase):
         mock_nav.get_album_list.return_value = [
             {"id": "alb_1", "name": "Sin Restricciones", "artist": "Miranda!"}
         ]
-        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Yo Te Dire", "track": 1}]
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Yo Te Dire", "track": 1, "totalTracks": 12}]
 
         mock_queue = MagicMock()
         tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
@@ -3339,7 +3339,7 @@ class TestPlaylistAligner(unittest.TestCase):
         mock_nav.get_album_list.return_value = [
             {"id": "alb_1", "name": "Honestidad Brutal", "artist": "Andrés Calamaro"}
         ]
-        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1}]
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1, "totalTracks": 37}]
         mock_listener = MagicMock()
 
         handler = SystemHandler(

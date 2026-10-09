@@ -37,7 +37,7 @@ class IncompleteAlbumAuditor:
         self.library_dir = Path(library_dir) if library_dir else None
         self.resolver = resolver
 
-    def _is_album_complete_on_disk(self, artist_name: str, album_name: str) -> bool:
+    def _is_album_complete_on_disk(self, artist_name: str, album_name: str, expected_min_tracks: int = 1) -> bool:
         """Checks if an album folder with audio tracks already exists on disk in library_dir."""
         if not self.library_dir or not self.library_dir.is_dir() or not artist_name or not album_name:
             return False
@@ -58,7 +58,7 @@ class IncompleteAlbumAuditor:
                         if re.sub(r"[^\w\s]", "", dir_alb.lower()).strip() == clean_alb:
                             try:
                                 audio_files = [f for f in alb_dir.glob("**/*") if f.is_file() and f.suffix.lower() in ('.m4a', '.mp3', '.flac')]
-                                if len(audio_files) >= 2:
+                                if len(audio_files) >= expected_min_tracks and len(audio_files) >= 1:
                                     return True
                             except Exception:
                                 pass
@@ -92,6 +92,11 @@ class IncompleteAlbumAuditor:
 
         skipped_offset = 0
         generic_artists = {"various artists", "varios artistas", "compilaciones", "soundtrack", "soundtracks", "unknown", "unknown artist"}
+        single_keywords = re.compile(
+            r"\b(single|sencillo|ep|remix|acoustic|session|character song|character songu|theme song|op single|ed single|insert song|c/w|feat|cover|instrumental|radio edit|karaoke|cv:)\b|"
+            r"(キャラクターソング|キャラソン|シングル|挿入歌|主題歌)",
+            re.I
+        )
 
         for alb in all_albums:
             if len(incomplete) >= limit:
@@ -109,7 +114,9 @@ class IncompleteAlbumAuditor:
                 continue
 
             # Exclude recognized singles or special folders
-            if alb_name.lower().startswith(("_singles", "single", "sencillo")) or re.search(r"\b(single|sencillo|ep|remix|acoustic|session)\b", alb_name, re.I):
+            if alb_name.lower().startswith(("_singles", "single", "sencillo")) or single_keywords.search(alb_name) or single_keywords.search(artist_name):
+                if self.state_tracker:
+                    self.state_tracker.mark_audited_complete(alb_name, artist_name)
                 continue
 
             # Check if user ignored, persistently blocked, or already audited complete
@@ -195,18 +202,51 @@ class IncompleteAlbumAuditor:
 
             # Check track number metadata
             track_numbers = []
+            total_tracks_meta = 0
             for t in nav_tracks:
                 trkn = t.get("track")
                 if trkn and isinstance(trkn, int):
                     track_numbers.append(trkn)
+                tot = t.get("totalTracks") or t.get("trackCount")
+                if tot and isinstance(tot, int) and tot > total_tracks_meta:
+                    total_tracks_meta = tot
 
-            if song_count == 1 and not re.search(r"\b(single|sencillo|ep)\b", alb_name, re.I):
-                is_candidate = True
-            elif track_numbers:
-                max_trkn = max(track_numbers)
-                if max_trkn > song_count and max_trkn <= 40:
+            if song_count == 1:
+                # If only 1 track is present, only consider it an incomplete studio album if:
+                # 1) The single track is not track 1 (e.g. track 5 of an album)
+                # 2) Or metadata explicitly declared totalTracks > 1
+                if track_numbers and track_numbers[0] > 1:
                     is_candidate = True
-                    total_expected = max_trkn
+                    total_expected = max(track_numbers[0], 2)
+                elif total_tracks_meta > 1:
+                    is_candidate = True
+                    total_expected = total_tracks_meta
+                else:
+                    # Standalone 1-track release / single -> not an incomplete album
+                    if self.state_tracker:
+                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                    continue
+            elif song_count >= 2:
+                if track_numbers:
+                    max_trkn = max(track_numbers)
+                    if max_trkn > song_count and max_trkn <= 60:
+                        is_candidate = True
+                        total_expected = max_trkn
+                    elif total_tracks_meta > song_count and total_tracks_meta <= 60:
+                        is_candidate = True
+                        total_expected = total_tracks_meta
+                    else:
+                        # Check for missing gaps in sequence (e.g. [1, 2, 4])
+                        min_trkn = min(track_numbers)
+                        expected_set = set(range(min_trkn, max_trkn + 1))
+                        if len(expected_set) > len(track_numbers):
+                            is_candidate = True
+                            total_expected = max_trkn
+                        else:
+                            # Sequence is complete!
+                            if self.state_tracker:
+                                self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                            continue
 
             if is_candidate:
                 if skipped_offset < offset:
@@ -232,7 +272,7 @@ class IncompleteAlbumAuditor:
                         self.state_tracker.mark_audited_complete(alb_name, artist_name)
                         continue
 
-                    if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name):
+                    if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name, expected_min_tracks=total_expected):
                         if self.state_tracker:
                             self.state_tracker.mark_audited_complete(resolved_alb.album_name, resolved_alb.artist_name)
                             self.state_tracker.mark_audited_complete(alb_name, artist_name)
