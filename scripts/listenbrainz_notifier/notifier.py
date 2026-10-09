@@ -400,6 +400,7 @@ def main():
             nav_url=nav_url,
             download_music_dir=download_music_dir,
             library_music_dir=library_music_dir,
+            resolver=universal_resolver,
         )
 
         authorized_chats = [t.chat_id for t in telegram.targets]

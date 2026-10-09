@@ -52,6 +52,7 @@ class SystemHandler:
         nav_url: str,
         download_music_dir: str,
         library_music_dir: str,
+        resolver: Optional[Any] = None,
     ):
         self.state_tracker = state_tracker
         self.download_queue = download_queue
@@ -63,6 +64,7 @@ class SystemHandler:
         self.nav_url = nav_url
         self.download_music_dir = download_music_dir
         self.library_music_dir = library_music_dir
+        self.resolver = resolver
         self.listener: Optional[Any] = None
 
     def set_listener(self, listener: Any):
@@ -339,7 +341,7 @@ class SystemHandler:
             downloader=getattr(self.download_queue, "downloader", None),
             state_tracker=self.state_tracker,
             library_dir=Path(self.library_music_dir) if self.library_music_dir else None,
-            resolver=getattr(self.download_queue, "resolver", None),
+            resolver=self.resolver,
         )
         incomplete = auditor.find_incomplete_albums(limit=30)
         if not incomplete:
@@ -489,7 +491,7 @@ class SystemHandler:
             downloader=getattr(self.download_queue, "downloader", None),
             state_tracker=self.state_tracker,
             library_dir=Path(self.library_music_dir) if self.library_music_dir else None,
-            resolver=getattr(self.download_queue, "resolver", None),
+            resolver=self.resolver,
         )
         candidates = auditor.find_incomplete_albums(limit=count, offset=offset)
         if not candidates:
@@ -559,7 +561,7 @@ class SystemHandler:
                 downloader=getattr(self.download_queue, "downloader", None),
                 state_tracker=self.state_tracker,
                 library_dir=Path(self.library_music_dir) if self.library_music_dir else None,
-                resolver=getattr(self.download_queue, "resolver", None),
+                resolver=self.resolver,
             )
             candidates = auditor.find_incomplete_albums(limit=count)
 

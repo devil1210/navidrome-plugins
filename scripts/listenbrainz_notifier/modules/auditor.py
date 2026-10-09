@@ -54,7 +54,14 @@ class IncompleteAlbumAuditor:
         self.downloader = downloader
         self.state_tracker = state_tracker
         self.library_dir = Path(library_dir) if library_dir else None
-        self.resolver = resolver
+        if resolver is not None:
+            self.resolver = resolver
+        else:
+            try:
+                from .resolver import YouTubeMusicResolver
+                self.resolver = YouTubeMusicResolver()
+            except Exception:
+                self.resolver = None
 
     def _is_album_complete_on_disk(self, artist_name: str, album_name: str, year: Optional[int] = None, expected_min_tracks: int = 1) -> bool:
         """Checks if an album folder with audio tracks already exists on disk in library_dir."""
@@ -356,8 +363,8 @@ class IncompleteAlbumAuditor:
 
                     incomplete.append({
                         "id": alb_id,
-                        "album_name": resolved_alb.album_name,
-                        "artist_name": resolved_alb.artist_name,
+                        "album_name": alb_name or resolved_alb.album_name,
+                        "artist_name": artist_name or resolved_alb.artist_name,
                         "present_count": song_count,
                         "expected_count": total_expected or (song_count + 1),
                         "cover_url": alb.get("coverArt") or getattr(resolved_alb, "cover_url", None),
