@@ -88,21 +88,65 @@ class StateTracker:
             "tracks": tracks,
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        self.state["__last_batches__"]["__latest__"] = playlist_name.lower()
+        has_items = bool(albums or tracks)
+        current_latest = self.state["__last_batches__"].get("__latest__")
+        # Only overwrite __latest__ if this batch actually has items, or if no latest is currently set
+        if has_items or not current_latest:
+            self.state["__last_batches__"]["__latest__"] = playlist_name.lower()
         self.save()
 
     def get_last_batch(self, playlist_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Retrieves the last resolved batch for a playlist or the most recent one."""
+        """Retrieves the last resolved batch for a playlist or the most recent one with pending items."""
         batches = self.state.get("__last_batches__", {})
         if not playlist_name:
             latest_key = batches.get("__latest__")
-            if latest_key and latest_key in batches:
-                return batches[latest_key]
+            if latest_key and latest_key in batches and isinstance(batches[latest_key], dict):
+                latest_batch = batches[latest_key]
+                if latest_batch.get("albums") or latest_batch.get("tracks"):
+                    return latest_batch
+
+            # Search for any batch that has pending albums or tracks
             for k, v in batches.items():
-                if k != "__latest__":
+                if k != "__latest__" and isinstance(v, dict):
+                    if v.get("albums") or v.get("tracks"):
+                        return v
+
+            # Fallback to latest_key even if empty
+            if latest_key and latest_key in batches and isinstance(batches[latest_key], dict):
+                return batches[latest_key]
+
+            for k, v in batches.items():
+                if k != "__latest__" and isinstance(v, dict):
                     return v
             return None
         return batches.get(playlist_name.lower())
+
+    def remove_from_last_batch(
+        self,
+        playlist_name: Optional[str] = None,
+        album_name: Optional[str] = None,
+        track_title: Optional[str] = None,
+    ):
+        """Removes a satisfied album or track from the persisted last batch."""
+        batches = self.state.get("__last_batches__", {})
+        keys = [playlist_name.lower()] if playlist_name else [k for k in batches if k != "__latest__"]
+        changed = False
+        for k in keys:
+            batch = batches.get(k)
+            if not isinstance(batch, dict):
+                continue
+            if album_name and "albums" in batch:
+                before = len(batch["albums"])
+                batch["albums"] = [a for a in batch["albums"] if a.get("album_name", "").lower() != album_name.lower()]
+                if len(batch["albums"]) < before:
+                    changed = True
+            if track_title and "tracks" in batch:
+                before = len(batch["tracks"])
+                batch["tracks"] = [t for t in batch["tracks"] if t.get("title", "").lower() != track_title.lower()]
+                if len(batch["tracks"]) < before:
+                    changed = True
+        if changed:
+            self.save()
 
     def save_last_discovered(self, items: List[Dict[str, Any]]):
         """Persists the latest recommended items for /descubrir and /dl_rec."""
@@ -129,6 +173,25 @@ class StateTracker:
         """Retrieves the latest new releases."""
         nr = self.state.get("__new_releases__", {})
         return nr.get("items", []) if isinstance(nr, dict) else []
+
+    def save_last_injected(self, playlist_name: str, tracks: List[Dict[str, Any]]):
+        """Persists injected tracks so sync commands and notifications can display them."""
+        if "__last_injected__" not in self.state:
+            self.state["__last_injected__"] = {}
+        self.state["__last_injected__"][playlist_name.lower()] = {
+            "playlist_name": playlist_name,
+            "tracks": tracks,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self.state["__last_injected__"]["__latest__"] = playlist_name.lower()
+        self.save()
+
+    def get_last_injected(self, playlist_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieves the last injected tracks for a playlist or all playlists."""
+        injected = self.state.get("__last_injected__", {})
+        if not playlist_name:
+            return {k: v for k, v in injected.items() if k != "__latest__"}
+        return injected.get(playlist_name.lower())
 
     def get_picard_plugins(self) -> Dict[str, bool]:
         """Returns the configuration of enabled/disabled Picard plugins."""
@@ -167,9 +230,11 @@ class StateTracker:
         return new_val
 
     @staticmethod
-    def _normalize_ignore_str(text: str) -> str:
-        if not text:
+    def _normalize_ignore_str(text: Any) -> str:
+        if text is None:
             return ""
+        if not isinstance(text, str):
+            text = str(text)
         import re
         import unicodedata
         nfkd = unicodedata.normalize("NFKD", text)
@@ -287,4 +352,192 @@ class StateTracker:
         self.save()
         logger.info("Cleared all %d ignored items", count)
         return count
+
+    def get_failed_items(self) -> List[Dict[str, Any]]:
+        """Returns the list of tracks/albums that failed to download or were blocked."""
+        failed = self.state.get("__failed_items__", [])
+        return failed if isinstance(failed, list) else []
+
+    def is_failed_blocked(self, name: str, artist: Optional[str] = None, max_failures: int = 3) -> bool:
+        """Checks if a track or album has persistently failed or is permanently unavailable."""
+        if not name:
+            return False
+        norm_name = self._normalize_ignore_str(name)
+        norm_artist = self._normalize_ignore_str(artist) if artist else ""
+
+        for item in self.get_failed_items():
+            item_norm_name = item.get("norm_name", "")
+            item_norm_artist = item.get("norm_artist", "")
+
+            name_match = (
+                norm_name == item_norm_name
+                or (len(norm_name) >= 4 and norm_name in item_norm_name)
+                or (len(item_norm_name) >= 4 and item_norm_name in norm_name)
+            )
+            if not name_match:
+                continue
+
+            if item_norm_artist and norm_artist:
+                artist_match = (
+                    norm_artist == item_norm_artist
+                    or norm_artist in item_norm_artist
+                    or item_norm_artist in norm_artist
+                )
+                if not artist_match:
+                    continue
+
+            # Check if permanent or exceeded retries
+            if item.get("is_permanent", False) or item.get("failure_count", 0) >= max_failures:
+                return True
+        return False
+
+    def record_failed_item(
+        self,
+        name: str,
+        artist: Optional[str] = None,
+        url: Optional[str] = None,
+        reason: str = "",
+        is_permanent: bool = False,
+    ):
+        """Records a failed download attempt, tracking count and error reason."""
+        if not name or not name.strip():
+            return
+        name_clean = name.strip()
+        artist_clean = artist.strip() if artist else ""
+        norm_name = self._normalize_ignore_str(name_clean)
+        norm_artist = self._normalize_ignore_str(artist_clean)
+
+        perm_triggers = [
+            "video unavailable", "unavailable in your country", "not available in your country",
+            "private video", "blocked in your country", "copyright", "removed by the user"
+        ]
+        if any(t in reason.lower() for t in perm_triggers):
+            is_permanent = True
+
+        failed = self.get_failed_items()
+        matched = None
+        for item in failed:
+            if item.get("norm_name") == norm_name:
+                if not norm_artist or item.get("norm_artist") == norm_artist:
+                    matched = item
+                    break
+
+        now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if matched:
+            matched["failure_count"] = matched.get("failure_count", 1) + 1
+            matched["last_reason"] = reason or matched.get("last_reason", "Unknown error")
+            matched["last_attempt"] = now_str
+            if is_permanent:
+                matched["is_permanent"] = True
+            if url:
+                matched["url"] = url
+        else:
+            failed.append({
+                "name": name_clean,
+                "artist": artist_clean,
+                "norm_name": norm_name,
+                "norm_artist": norm_artist,
+                "url": url or "",
+                "failure_count": 1,
+                "last_reason": reason or "Unknown error",
+                "first_attempt": now_str,
+                "last_attempt": now_str,
+                "is_permanent": is_permanent,
+            })
+
+        self.state["__failed_items__"] = failed
+        self.save()
+        logger.warning(
+            "Recorded download failure for '%s' by '%s': %s (Permanent: %s)",
+            name_clean, artist_clean, reason[:80], is_permanent
+        )
+
+    def remove_failed_item(self, query: str) -> bool:
+        """Removes a failed item by name, substring, or 1-based index."""
+        failed = self.get_failed_items()
+        if not failed:
+            return False
+
+        try:
+            idx = int(query.strip())
+            if 1 <= idx <= len(failed):
+                removed = failed.pop(idx - 1)
+                self.state["__failed_items__"] = failed
+                self.save()
+                logger.info("Removed from failed registry by index %d: '%s'", idx, removed.get("name"))
+                return True
+        except ValueError:
+            pass
+
+        norm_query = self._normalize_ignore_str(query)
+        new_failed = []
+        removed_any = False
+        for item in failed:
+            item_norm = item.get("norm_name", "")
+            if item_norm == norm_query or (len(norm_query) >= 3 and norm_query in item_norm):
+                removed_any = True
+                logger.info("Removed from failed registry: '%s'", item.get("name"))
+            else:
+                new_failed.append(item)
+
+        if removed_any:
+            self.state["__failed_items__"] = new_failed
+            self.save()
+            return True
+        return False
+
+    def clear_failed_items(self) -> int:
+        """Clears all failed registry entries and returns the count cleared."""
+        count = len(self.get_failed_items())
+        self.state["__failed_items__"] = []
+        self.save()
+        logger.info("Cleared all %d failed items from registry", count)
+        return count
+
+    def save_incomplete_batch(self, items: List[Dict[str, Any]]):
+        """Persists the latest candidate incomplete album batch for interactive /completar."""
+        from dataclasses import asdict, is_dataclass
+        serializable_items = []
+        for it in items:
+            c = {}
+            for k, v in dict(it).items():
+                if k == "resolved_album" and is_dataclass(v):
+                    c[k] = asdict(v)
+                elif hasattr(v, "__class__") and v.__class__.__name__ == "MagicMock":
+                    c[k] = str(v)
+                else:
+                    c[k] = v
+            serializable_items.append(c)
+
+        self.state["__incomplete_batch__"] = {
+            "items": serializable_items,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        try:
+            self.save()
+        except Exception as e:
+            logger.debug("Could not save incomplete batch to state: %s", e)
+
+    def get_incomplete_batch(self) -> List[Dict[str, Any]]:
+        """Retrieves the persisted incomplete album batch."""
+        inc = self.state.get("__incomplete_batch__", {})
+        return inc.get("items", []) if isinstance(inc, dict) else []
+
+    def is_audited_complete(self, album_name: str, artist_name: str) -> bool:
+        """Returns True if the album has already been audited/downloaded and verified complete."""
+        norm_key = f"{self._normalize_ignore_str(artist_name)} - {self._normalize_ignore_str(album_name)}"
+        audited = self.state.get("__audited_completed__", {})
+        return norm_key in audited
+
+    def mark_audited_complete(self, album_name: str, artist_name: str):
+        """Marks an album as verified complete so the auditor doesn't repeatedly propose it."""
+        norm_key = f"{self._normalize_ignore_str(artist_name)} - {self._normalize_ignore_str(album_name)}"
+        if "__audited_completed__" not in self.state:
+            self.state["__audited_completed__"] = {}
+        self.state["__audited_completed__"][norm_key] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.save()
+        logger.debug("Marked album as audited complete: '%s' by '%s'", album_name, artist_name)
+
+
+
 

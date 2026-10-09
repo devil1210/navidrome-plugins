@@ -75,9 +75,15 @@ class YouTubeMusicDiscoverer:
 
     @staticmethod
     def _build_browser_headers(cookie_path: Path) -> Optional[Dict[str, str]]:
-        """Parses Netscape cookie file and computes SAPISIDHASH for YouTube Music."""
+        """Parses Netscape cookie file or JSON auth file and computes SAPISIDHASH for YouTube Music."""
         try:
-            cookies = []
+            if str(cookie_path).endswith(".json"):
+                with open(cookie_path, "r", encoding="utf-8") as jf:
+                    data = json.load(jf)
+                    if isinstance(data, dict) and "Cookie" in data:
+                        return data
+
+            cookie_dict = {}
             sapisid = ""
             with open(cookie_path, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
@@ -85,18 +91,21 @@ class YouTubeMusicDiscoverer:
                     if not line or line.startswith("#"):
                         continue
                     parts = line.split("\t")
-                    if len(parts) >= 7 and "youtube.com" in parts[0]:
-                        c_name = parts[5].strip()
-                        c_val = parts[6].strip()
-                        cookies.append(f"{c_name}={c_val}")
-                        if c_name in ("__Secure-3PAPISID", "__Secure-1PAPISID", "SAPISID"):
-                            if not sapisid or c_name == "__Secure-3PAPISID":
-                                sapisid = c_val
+                    if len(parts) >= 7:
+                        dom = parts[0].lower()
+                        if "youtube.com" in dom or "google.com" in dom or "google.cl" in dom:
+                            c_name = parts[5].strip()
+                            c_val = parts[6].strip()
+                            if "youtube.com" in dom or c_name not in cookie_dict:
+                                cookie_dict[c_name] = c_val
+                            if c_name in ("__Secure-3PAPISID", "__Secure-1PAPISID", "SAPISID"):
+                                if not sapisid or c_name == "__Secure-3PAPISID":
+                                    sapisid = c_val
 
-            if not cookies:
+            if not cookie_dict:
                 return None
 
-            cookie_header = "; ".join(cookies)
+            cookie_header = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
             origin = "https://music.youtube.com"
 
             if not sapisid:
@@ -147,15 +156,16 @@ class YouTubeMusicDiscoverer:
         limit: int = 8,
     ) -> List[Dict[str, Any]]:
         """
-        Retrieves personalized recommendations from 'Albums for you', 'New releases',
-        and 'Quick picks', filtering out anything already in Navidrome or on disk.
+        Retrieves personalized recommendations prioritizing 'Tu descubrimiento diario' /
+        'Discover', followed by 'Albums for you' and 'Quick picks', filtering out anything already in Navidrome or on disk.
         """
         if not self.yt:
             return []
 
-        candidates = []
+        p1_candidates = []
+        p2_candidates = []
         try:
-            home = self.yt.get_home(limit=15)
+            home = self.yt.get_home(limit=25)
         except Exception as e:
             logger.error("Error consultando home en YouTube Music: %s", e)
             home = []
@@ -164,8 +174,10 @@ class YouTubeMusicDiscoverer:
 
         for section in home:
             sec_title = section.get("title", "")
-            is_album_section = any(k in sec_title.lower() for k in ["album", "release", "novedad", "para ti", "for you"])
-            is_track_section = any(k in sec_title.lower() for k in ["quick", "selecc", "video", "picks"])
+            lower_title = sec_title.lower()
+            is_descubrimiento = any(k in lower_title for k in ["descubrimiento", "discover", "diario", "tu descubrimiento"])
+            is_album_section = is_descubrimiento or any(k in lower_title for k in ["album", "release", "novedad", "para ti", "for you"])
+            is_track_section = is_descubrimiento or any(k in lower_title for k in ["quick", "selecc", "video", "picks", "mix"])
 
             if not is_album_section and not is_track_section:
                 continue
@@ -193,8 +205,10 @@ class YouTubeMusicDiscoverer:
                 if thumb_url:
                     thumb_url = re.sub(r"=w\d+-h\d+.*", "=w600-h600-l90-rj", thumb_url)
 
-                if bid and (bid.startswith("MPREb_") or is_album_section):
-                    candidates.append({
+                target_list = p1_candidates if is_descubrimiento else p2_candidates
+
+                if bid and (bid.startswith("MPREb_") or (is_album_section and not is_descubrimiento)):
+                    target_list.append({
                         "kind": "album",
                         "title": title,
                         "artist": artist,
@@ -202,16 +216,18 @@ class YouTubeMusicDiscoverer:
                         "cover_url": thumb_url,
                         "section": sec_title,
                     })
-                elif vid:
-                    candidates.append({
-                        "kind": "track",
+                elif vid or bid:
+                    target_list.append({
+                        "kind": "track" if vid else "album",
                         "title": title,
                         "artist": artist,
                         "video_id": vid,
+                        "browse_id": bid,
                         "cover_url": thumb_url,
                         "section": sec_title,
                     })
 
+        candidates = p1_candidates + p2_candidates
         return self._filter_and_resolve_candidates(candidates, navidrome=navidrome, limit=limit)
 
     def get_new_releases(
@@ -220,8 +236,8 @@ class YouTubeMusicDiscoverer:
         limit: int = 8,
     ) -> List[Dict[str, Any]]:
         """
-        Retrieves fresh new releases from artists the user listens to or trending explore,
-        filtering out anything already in Navidrome or on disk.
+        Retrieves fresh new releases prioritizing the user's personalized 'Últimos lanzamientos' / 'New releases'
+        from home, falling back to explore new releases only if needed.
         """
         if not self.yt:
             return []
@@ -229,57 +245,96 @@ class YouTubeMusicDiscoverer:
         candidates = []
         seen_keys = set()
 
-        # 1. From official New Releases Albums & Singles catalog (FEmusic_new_releases_albums)
-        # Directly corresponds to https://music.youtube.com/new_releases/albums
+        # 1. Prioritize user's personalized Home section ('Últimos lanzamientos', 'New releases')
         try:
-            raw = self.yt._send_request("browse", {"browseId": "FEmusic_new_releases_albums"})
-            section_list = raw.get("contents", {}).get("singleColumnBrowseResultsRenderer", {}).get("tabs", [{}])[0].get("tabRenderer", {}).get("content", {}).get("sectionListRenderer", {}).get("contents", [])
-            for sec in section_list:
-                grid = sec.get("gridRenderer", {}) or sec.get("musicGridRenderer", {})
-                if not grid:
-                    continue
-                for it in grid.get("items", []):
-                    renderer = it.get("musicTwoRowItemRenderer", {})
-                    if not renderer:
-                        continue
-                    title = renderer.get("title", {}).get("runs", [{}])[0].get("text", "").strip()
-                    bid = renderer.get("navigationEndpoint", {}).get("browseEndpoint", {}).get("browseId", "")
-                    if not title or not bid:
-                        continue
-                    sub_runs = renderer.get("subtitle", {}).get("runs", [])
-                    kind_text = ""
-                    artist = ""
-                    for r in sub_runs:
-                        t = r.get("text", "").strip()
-                        if not t or t == "•":
+            home = self.yt.get_home(limit=25)
+            for section in home:
+                sec_title = section.get("title", "")
+                lower_title = sec_title.lower()
+                if any(k in lower_title for k in ["últimos lanzamientos", "ultimos lanzamientos", "lanzamientos", "new release", "novedad"]):
+                    for item in section.get("contents", []):
+                        bid = item.get("browseId")
+                        title = item.get("title", "").strip()
+                        if not title or not bid:
                             continue
-                        if t.lower() in ["single", "álbum", "album", "ep"]:
-                            kind_text = t
-                        elif not t.isdigit() and not artist:
-                            artist = t
+                        artists_list = item.get("artists", [])
+                        if isinstance(artists_list, list):
+                            artist = ", ".join([a.get("name", "") for a in artists_list if isinstance(a, dict) and a.get("name")])
+                        else:
+                            artist = str(artists_list or "")
 
-                    key = f"{title.lower()}:{artist.lower()}"
-                    if key in seen_keys:
-                        continue
-                    seen_keys.add(key)
+                        key = f"{title.lower()}:{artist.lower()}"
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
 
-                    thumbs = renderer.get("thumbnailRenderer", {}).get("musicThumbnailRenderer", {}).get("thumbnail", {}).get("thumbnails", [])
-                    thumb_url = thumbs[-1].get("url") if thumbs else None
-                    if thumb_url:
-                        thumb_url = re.sub(r"=w\d+-h\d+.*", "=w600-h600-l90-rj", thumb_url)
+                        thumbs = item.get("thumbnails", [])
+                        thumb_url = thumbs[-1].get("url") if thumbs else None
+                        if thumb_url:
+                            thumb_url = re.sub(r"=w\d+-h\d+.*", "=w600-h600-l90-rj", thumb_url)
 
-                    candidates.append({
-                        "kind": "album",
-                        "title": title,
-                        "artist": artist or "Desconocido",
-                        "browse_id": bid,
-                        "cover_url": thumb_url,
-                        "section": f"Nuevos Lanzamientos ({kind_text or 'Álbum'})",
-                    })
+                        candidates.append({
+                            "kind": "album",
+                            "title": title,
+                            "artist": artist,
+                            "browse_id": bid,
+                            "cover_url": thumb_url,
+                            "section": sec_title or "Últimos lanzamientos",
+                        })
         except Exception as e:
-            logger.warning("Error consultando FEmusic_new_releases_albums: %s", e)
+            logger.debug("Error revisando home new releases: %s", e)
 
-        # 2. Fallback: Explore new_releases if catalog empty
+        # 2. Fallback to official catalog if personalized home had fewer than limit
+        if len(candidates) < limit:
+            try:
+                raw = self.yt._send_request("browse", {"browseId": "FEmusic_new_releases_albums"})
+                section_list = raw.get("contents", {}).get("singleColumnBrowseResultsRenderer", {}).get("tabs", [{}])[0].get("tabRenderer", {}).get("content", {}).get("sectionListRenderer", {}).get("contents", [])
+                for sec in section_list:
+                    grid = sec.get("gridRenderer", {}) or sec.get("musicGridRenderer", {})
+                    if not grid:
+                        continue
+                    for it in grid.get("items", []):
+                        renderer = it.get("musicTwoRowItemRenderer", {})
+                        if not renderer:
+                            continue
+                        title = renderer.get("title", {}).get("runs", [{}])[0].get("text", "").strip()
+                        bid = renderer.get("navigationEndpoint", {}).get("browseEndpoint", {}).get("browseId", "")
+                        if not title or not bid:
+                            continue
+                        sub_runs = renderer.get("subtitle", {}).get("runs", [])
+                        kind_text = ""
+                        artist = ""
+                        for r in sub_runs:
+                            t = r.get("text", "").strip()
+                            if not t or t == "•":
+                                continue
+                            if t.lower() in ["single", "álbum", "album", "ep"]:
+                                kind_text = t
+                            elif not t.isdigit() and not artist:
+                                artist = t
+
+                        key = f"{title.lower()}:{artist.lower()}"
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+
+                        thumbs = renderer.get("thumbnailRenderer", {}).get("musicThumbnailRenderer", {}).get("thumbnail", {}).get("thumbnails", [])
+                        thumb_url = thumbs[-1].get("url") if thumbs else None
+                        if thumb_url:
+                            thumb_url = re.sub(r"=w\d+-h\d+.*", "=w600-h600-l90-rj", thumb_url)
+
+                        candidates.append({
+                            "kind": "album",
+                            "title": title,
+                            "artist": artist or "Desconocido",
+                            "browse_id": bid,
+                            "cover_url": thumb_url,
+                            "section": f"Nuevos Lanzamientos ({kind_text or 'Álbum'})",
+                        })
+            except Exception as e:
+                logger.warning("Error consultando FEmusic_new_releases_albums: %s", e)
+
+        # 3. Fallback: Explore new_releases if still empty
         if not candidates:
             try:
                 explore = self.yt.get_explore()
@@ -315,44 +370,6 @@ class YouTubeMusicDiscoverer:
                     })
             except Exception as e:
                 logger.warning("Error consultando explore en YouTube Music: %s", e)
-
-        # 3. Also check Home New releases section
-        try:
-            home = self.yt.get_home(limit=12)
-            for section in home:
-                sec_title = section.get("title", "")
-                if any(k in sec_title.lower() for k in ["new release", "lanzamiento", "novedad"]):
-                    for item in section.get("contents", []):
-                        bid = item.get("browseId")
-                        title = item.get("title", "").strip()
-                        if not title or not bid:
-                            continue
-                        artists_list = item.get("artists", [])
-                        if isinstance(artists_list, list):
-                            artist = ", ".join([a.get("name", "") for a in artists_list if isinstance(a, dict) and a.get("name")])
-                        else:
-                            artist = str(artists_list or "")
-
-                        key = f"{title.lower()}:{artist.lower()}"
-                        if key in seen_keys:
-                            continue
-                        seen_keys.add(key)
-
-                        thumbs = item.get("thumbnails", [])
-                        thumb_url = thumbs[-1].get("url") if thumbs else None
-                        if thumb_url:
-                            thumb_url = re.sub(r"=w\d+-h\d+.*", "=w600-h600-l90-rj", thumb_url)
-
-                        candidates.append({
-                            "kind": "album",
-                            "title": title,
-                            "artist": artist,
-                            "browse_id": bid,
-                            "cover_url": thumb_url,
-                            "section": "Novedades Personalizadas",
-                        })
-        except Exception as e:
-            logger.debug("Error revisando home new releases: %s", e)
 
         return self._filter_and_resolve_candidates(candidates, navidrome=navidrome, limit=limit)
 

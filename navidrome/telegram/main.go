@@ -22,7 +22,7 @@ const (
 	pollScheduleID  = "telegram-album-poll"
 	kvLastSeenAlbum = "last_seen_album_id"
 	defaultCronExpr = "*/1 * * * *"
-	defaultPollSize = "20"
+	defaultPollSize = "100"
 
 	cfgSubsonicUser        = "subsonic_user"
 	cfgSubsonicPassword    = "subsonic_password"
@@ -45,7 +45,7 @@ const (
 
 const (
 	defaultTitleTemplate  = "<h3>📚 {album}</h3>\n<h4>👤 {artist}</h4>"
-	defaultBodyTemplate   = "<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n  <blockquote>\n    {songs}\n  </blockquote>\n</details>\n\n<hr/>\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
+	defaultBodyTemplate   = "<table bordered striped>\n  <tr>\n    <td><b>📅 Año</b></td>\n    <td>{year}</td>\n  </tr>\n  <tr>\n    <td><b>📦 Género</b></td>\n    <td>{genre}</td>\n  </tr>\n  <tr>\n    <td><b>💿 Discos</b></td>\n    <td>{discCount}</td>\n  </tr>\n  <tr>\n    <td><b>🔢 Canciones</b></td>\n    <td>{songCount}</td>\n  </tr>\n  <tr>\n    <td><b>🕒 Duración</b></td>\n    <td>{duration}</td>\n  </tr>\n</table>\n\n<details>\n  <summary>🎵 Ver Lista de Canciones</summary>\n{songs}\n</details>\n\n<hr/>\n<a href=\"{url}\">🌐 Escuchar en Navidrome</a>"
 	defaultSubsonicClient = "navidrome-telegram-plugin"
 	defaultSubsonicAPI    = "1.16.1"
 	defaultCoverSize      = "600"
@@ -596,15 +596,29 @@ func formatSongListTelegram(songs []subsonicSong, parseMode string) string {
 	if !hasMultipleDiscs(songs) {
 		var sb strings.Builder
 		if isHTML {
-			sb.WriteString("<ul>\n")
+			sb.WriteString("<table bordered striped compact>\n")
+			sb.WriteString("  <tr><th align=\"center\">#</th><th align=\"left\">Título</th><th align=\"center\">Duración</th></tr>\n")
+			for _, s := range songs {
+				trackStr := fmt.Sprintf("%02d", s.Track)
+				if s.Track <= 0 {
+					trackStr = "-"
+				}
+				durStr := formatDuration(s.Duration)
+				if s.Duration <= 0 {
+					durStr = "-"
+				}
+				escapedTitle := escapeHTML(s.Title)
+				sb.WriteString(fmt.Sprintf("  <tr><td align=\"center\">%s</td><td align=\"left\">%s</td><td align=\"center\">%s</td></tr>\n", trackStr, escapedTitle, durStr))
+			}
+			sb.WriteString("</table>")
+			return sb.String()
 		}
+
 		for _, s := range songs {
 			trackPrefix := ""
 			if s.Track > 0 {
 				if isM2 {
 					trackPrefix = fmt.Sprintf("%d\\. ", s.Track)
-				} else if isHTML {
-					trackPrefix = fmt.Sprintf("<b>%02d.</b> ", s.Track)
 				} else {
 					trackPrefix = fmt.Sprintf("%d. ", s.Track)
 				}
@@ -617,14 +631,7 @@ func formatSongListTelegram(songs []subsonicSong, parseMode string) string {
 				}
 			}
 			escapedTitle := escapeValue(s.Title, parseMode)
-			if isHTML {
-				sb.WriteString(fmt.Sprintf("  <li>%s%s%s</li>\n", trackPrefix, escapedTitle, durationSuffix))
-			} else {
-				sb.WriteString(fmt.Sprintf("%s%s%s\n", trackPrefix, escapedTitle, durationSuffix))
-			}
-		}
-		if isHTML {
-			sb.WriteString("</ul>")
+			sb.WriteString(fmt.Sprintf("%s%s%s\n", trackPrefix, escapedTitle, durationSuffix))
 		}
 		return strings.TrimSuffix(sb.String(), "\n")
 	}
@@ -638,20 +645,21 @@ func formatSongListTelegram(songs []subsonicSong, parseMode string) string {
 	for i, g := range groups {
 		discName := fmt.Sprintf("Disco %d", g.DiscNumber)
 		if isHTML {
-			sb.WriteString(fmt.Sprintf("<details open>\n  <summary>💿 %s</summary>\n  <ul>\n", escapeHTML(discName)))
+			sb.WriteString(fmt.Sprintf("<details open>\n  <summary>💿 %s</summary>\n  <table bordered striped compact>\n", escapeHTML(discName)))
+			sb.WriteString("    <tr><th align=\"center\">#</th><th align=\"left\">Título</th><th align=\"center\">Duración</th></tr>\n")
 			for _, s := range g.Songs {
-				trackPrefix := ""
-				if s.Track > 0 {
-					trackPrefix = fmt.Sprintf("<b>%02d.</b> ", s.Track)
+				trackStr := fmt.Sprintf("%02d", s.Track)
+				if s.Track <= 0 {
+					trackStr = "-"
 				}
-				durationSuffix := ""
-				if s.Duration > 0 {
-					durationSuffix = fmt.Sprintf(" (%s)", formatDuration(s.Duration))
+				durStr := formatDuration(s.Duration)
+				if s.Duration <= 0 {
+					durStr = "-"
 				}
 				escapedTitle := escapeHTML(s.Title)
-				sb.WriteString(fmt.Sprintf("    <li>%s%s%s</li>\n", trackPrefix, escapedTitle, durationSuffix))
+				sb.WriteString(fmt.Sprintf("    <tr><td align=\"center\">%s</td><td align=\"left\">%s</td><td align=\"center\">%s</td></tr>\n", trackStr, escapedTitle, durStr))
 			}
-			sb.WriteString("  </ul>\n</details>")
+			sb.WriteString("  </table>\n</details>")
 			if i < len(groups)-1 {
 				sb.WriteString("\n")
 			}
@@ -1051,11 +1059,56 @@ func sendTelegramDirect(botToken, chatIDConfig, title, body, imageURL string, al
 		htmlContent = telegramBody
 	}
 
-	// Auto-inject image tag if image exists and is not already referenced in HTML
-	if imageURL != "" && !strings.Contains(htmlContent, "tg://photo?id=cover") {
+	// Download cover art once for all target chats
+	var imgBytes []byte
+	if imageURL != "" {
+		pdk.Log(pdk.LogInfo, fmt.Sprintf("descargando portada del album para subirla a Telegram: %s", imageURL))
+		imgResp, err := host.HTTPSend(host.HTTPRequest{
+			Method:    "GET",
+			URL:       imageURL,
+			TimeoutMs: 15000,
+		})
+		if err == nil && imgResp.StatusCode >= 200 && imgResp.StatusCode < 300 {
+			pdk.Log(pdk.LogInfo, "portada descargada correctamente")
+			imgBytes = imgResp.Body
+		} else {
+			statusCode := int32(-1)
+			if err == nil {
+				statusCode = imgResp.StatusCode
+			}
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("no se pudo descargar la portada (status=%d, err=%v)", statusCode, err))
+
+			// Automatic local fallback to 127.0.0.1:4533 if original imageURL failed
+			if u, uErr := url.Parse(imageURL); uErr == nil && u.Host != "127.0.0.1:4533" && u.Host != "localhost:4533" {
+				localURL := "http://127.0.0.1:4533" + u.RequestURI()
+				pdk.Log(pdk.LogInfo, fmt.Sprintf("reintentando descarga de portada via fallback local: %s", localURL))
+				localResp, lErr := host.HTTPSend(host.HTTPRequest{
+					Method:    "GET",
+					URL:       localURL,
+					TimeoutMs: 5000,
+				})
+				if lErr == nil && localResp.StatusCode >= 200 && localResp.StatusCode < 300 {
+					pdk.Log(pdk.LogInfo, "portada descargada correctamente via fallback local")
+					imgBytes = localResp.Body
+				} else {
+					pdk.Log(pdk.LogWarn, "fallback local de portada también falló; enviando sin portada...")
+				}
+			} else {
+				pdk.Log(pdk.LogWarn, "enviando sin portada...")
+			}
+		}
+	}
+
+	// Critical safeguard for Telegram: only keep/inject <img src="tg://photo?id=cover" /> if we have image bytes!
+	// If imgBytes is empty, remove any <img .../> tag to avoid 400 Bad Request: RICH_MESSAGE_PHOTO_INVALID
+	if len(imgBytes) == 0 {
+		htmlContent = strings.ReplaceAll(htmlContent, "<img src=\"tg://photo?id=cover\" />", "")
+		htmlContent = strings.ReplaceAll(htmlContent, "<img src=\"tg://photo?id=cover\"/>", "")
+	} else if !strings.Contains(htmlContent, "tg://photo?id=cover") {
 		htmlContent = "<img src=\"tg://photo?id=cover\" />" + htmlContent
 	}
 
+	var lastErr error
 	// Split chat IDs by comma to support sending to multiple chats
 	chatIDs := strings.Split(chatIDConfig, ",")
 	for _, rawChatID := range chatIDs {
@@ -1084,29 +1137,10 @@ func sendTelegramDirect(botToken, chatIDConfig, title, body, imageURL string, al
 
 		pdk.Log(pdk.LogInfo, fmt.Sprintf("sending Telegram rich notification to chat=%s thread=%d", targetChatID, targetThreadID))
 
-		var imgBytes []byte
-		if imageURL != "" {
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("descargando portada del album para subirla a Telegram: %s", imageURL))
-			imgResp, err := host.HTTPSend(host.HTTPRequest{
-				Method:    "GET",
-				URL:       imageURL,
-				TimeoutMs: 15000,
-			})
-			if err == nil && imgResp.StatusCode >= 200 && imgResp.StatusCode < 300 {
-				pdk.Log(pdk.LogInfo, "portada descargada correctamente")
-				imgBytes = imgResp.Body
-			} else {
-				statusCode := int32(-1)
-				if err == nil {
-					statusCode = imgResp.StatusCode
-				}
-				pdk.Log(pdk.LogWarn, fmt.Sprintf("no se pudo descargar la portada (status=%d, err=%v); enviando sin portada...", statusCode, err))
-			}
-		}
-
 		resp, err := sendTelegramRichMessage(apiBase, targetChatID, targetThreadID, htmlContent, imgBytes)
 		if err != nil {
 			pdk.Log(pdk.LogError, fmt.Sprintf("telegram sendRichMessage API error: %v", err))
+			lastErr = err
 			continue
 		}
 
@@ -1114,10 +1148,11 @@ func sendTelegramDirect(botToken, chatIDConfig, title, body, imageURL string, al
 			pdk.Log(pdk.LogInfo, fmt.Sprintf("telegram rich message sent successfully for %q by %q to chat %s", album.Name, album.Artist, targetChatID))
 		} else {
 			pdk.Log(pdk.LogError, fmt.Sprintf("telegram sendRichMessage returned status %d for chat %s (body: %q)", resp.StatusCode, targetChatID, string(resp.Body)))
+			lastErr = fmt.Errorf("telegram returned status %d: %s", resp.StatusCode, string(resp.Body))
 		}
 	}
 
-	return nil
+	return lastErr
 }
 
 func folderWatermarkKey(folderID string) string {

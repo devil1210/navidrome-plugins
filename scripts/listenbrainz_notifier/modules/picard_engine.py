@@ -634,7 +634,8 @@ class PicardEngine:
         """Sanitizes folder/file names for Windows and Linux filesystems."""
         if not name:
             return "Unknown"
-        s = re.sub(r'[<>:"/\\|?*]', '_', name)
+        s = re.sub(r'[/\\|]', '-', name)
+        s = re.sub(r'[<>:"?*]', '_', s)
         s = re.sub(r'\s+', ' ', s)
         return s.strip('. ') or "Unknown"
 
@@ -663,7 +664,16 @@ class PicardEngine:
 
         try:
             rel_path = target_file.relative_to(library_root)
-            backup_file = library_root / "_duplicados_backup" / rel_path
+            backup_root = library_root / "_duplicados_backup"
+            ndignore = backup_root / ".ndignore"
+            if not ndignore.exists():
+                try:
+                    backup_root.mkdir(parents=True, exist_ok=True)
+                    ndignore.write_text("# Navidrome ignore\n", encoding="utf-8")
+                except Exception:
+                    pass
+
+            backup_file = backup_root / rel_path
             backup_file.parent.mkdir(parents=True, exist_ok=True)
 
             shutil.move(str(target_file), str(backup_file))
@@ -934,6 +944,17 @@ class PicardEngine:
 
         # Check if an existing matching album folder already exists in the artist directory
         artist_dir = dest_dir.parent
+        if not artist_dir.exists():
+            genre_dir = artist_dir.parent
+            if genre_dir.is_dir():
+                target_norm = re.sub(r"[\W_]+", "", artist_dir.name).lower()
+                for existing_dir in genre_dir.iterdir():
+                    if existing_dir.is_dir():
+                        if re.sub(r"[\W_]+", "", existing_dir.name).lower() == target_norm:
+                            artist_dir = existing_dir
+                            dest_dir = artist_dir / dest_dir.name
+                            break
+
         existing_match = cls.find_matching_existing_album(
             artist_dir=artist_dir,
             album_name=final_album_name,

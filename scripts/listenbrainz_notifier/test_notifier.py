@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from notifier import (
+    AlbumProgressStreamer,
     DownloadJob,
     DownloadQueue,
     ListenBrainzEnricher,
@@ -439,6 +440,25 @@ class TestBatchingAndLimits(unittest.TestCase):
             latest = tracker.get_last_batch()
             self.assertIsNotNone(latest)
             self.assertEqual(latest["playlist_name"], "Descubrimiento Diario")
+
+            # Verify that saving an empty batch for another playlist does not clobber __latest__
+            tracker.save_last_batch(
+                playlist_name="The Guy She Was Interested In",
+                batch_number=1,
+                batch_size=20,
+                total_batches=1,
+                albums=[],
+                tracks=[],
+            )
+            # Querying default batch must still yield Descubrimiento Diario
+            latest_after_empty = tracker.get_last_batch()
+            self.assertIsNotNone(latest_after_empty)
+            self.assertEqual(latest_after_empty["playlist_name"], "Descubrimiento Diario")
+
+            # Querying the specific empty playlist returns its batch
+            empty_batch = tracker.get_last_batch("The Guy She Was Interested In")
+            self.assertIsNotNone(empty_batch)
+            self.assertEqual(len(empty_batch["albums"]), 0)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -648,6 +668,26 @@ class TestNavidromeClient(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["id"], "song_crime_akira")
 
+    def test_find_best_match_strict_artist_different_artist_cover(self):
+        # In Navidrome: "Tu falta de querer" by "Mon Laferte"
+        # Target: "Tu Falta De Querer" by "Suriw" (cover version)
+        self.client.search_songs = MagicMock(return_value=[
+            {
+                "id": "song_mon_laferte",
+                "title": "Tu falta de querer",
+                "artist": "Mon Laferte",
+                "album": "Mon Laferte, vol. 1",
+            }
+        ])
+        # With strict_artist=True (used by Downloader), it MUST NOT match a different artist's track
+        match_strict = self.client.find_best_match("Tu Falta De Querer", "Suriw", strict_artist=True)
+        self.assertIsNone(match_strict)
+
+        # Same artist should match with strict_artist=True
+        match_same = self.client.find_best_match("Tu Falta De Querer", "Mon Laferte", strict_artist=True)
+        self.assertIsNotNone(match_same)
+        self.assertEqual(match_same["id"], "song_mon_laferte")
+
     def test_find_best_match_word_stem_romance(self):
         # In Navidrome: "大正浪漫 - Taishourouman" by "YOASOBI"
         # In ListenBrainz: "Romance" by "YOASOBI"
@@ -663,14 +703,41 @@ class TestNavidromeClient(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["id"], "song_yoasobi_romance")
 
+    def test_find_all_album_matches_single_letter_and_editions(self):
+        # Navidrome Subsonic search3 ignores 1-character queries like 'x',
+        # but surfaces candidates when searching by full query or artist 'Ed Sheeran'
+        def fake_search_albums(q, **kwargs):
+            if q == "x":
+                return []
+            if "Ed Sheeran" in q or "Deluxe" in q:
+                return [
+                    {
+                        "id": "alb_x_deluxe",
+                        "name": "x (Deluxe Edition)",
+                        "artist": "Ed Sheeran",
+                        "songCount": 16,
+                    }
+                ]
+            return []
+
+        self.client.search_albums = MagicMock(side_effect=fake_search_albums)
+        matches = self.client.find_all_album_matches("x (Deluxe Edition)", "Ed Sheeran")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["id"], "alb_x_deluxe")
+
+        # find_album_match should also return this best match
+        best = self.client.find_album_match("x (Deluxe Edition)", "Ed Sheeran")
+        self.assertIsNotNone(best)
+        self.assertEqual(best["id"], "alb_x_deluxe")
+
 
 class TestMusicDownloader(unittest.TestCase):
 
     def setUp(self):
-        self.downloader = MusicDownloader(download_dir="./test_downloads")
+        self.downloader = MusicDownloader(download_dir="./test_downloads", library_dir="./test_downloads/mock_lib")
 
     def test_sanitize_name(self):
-        self.assertEqual(MusicDownloader.sanitize_name("AC/DC"), "AC_DC")
+        self.assertEqual(MusicDownloader.sanitize_name("AC/DC"), "AC-DC")
         self.assertEqual(MusicDownloader.sanitize_name('Album: "Best of" *Special*?'), "Album_ _Best of_ _Special__")
         self.assertEqual(MusicDownloader.sanitize_name("   Valid Album Name.  "), "Valid Album Name")
         self.assertEqual(MusicDownloader.sanitize_name(""), "Unknown")
@@ -721,21 +788,25 @@ class TestMusicDownloader(unittest.TestCase):
         mock_ydl_instance = MagicMock()
         mock_ydl_cls.return_value.__enter__.return_value = mock_ydl_instance
         def fake_download(urls):
-            target_file = tmp_path / "American Idiot" / "01 - Green Day - American Idiot.m4a"
+            target_file = tmp_path / "Mock Album" / "01 - Mock Artist - Mock Track.m4a"
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_text("audio data")
         mock_ydl_instance.download.side_effect = fake_download
 
-        downloader = MusicDownloader(download_dir=str(tmp_path))
+        mock_lib = tmp_path / "mock_lib"
+        mock_lib.mkdir(parents=True, exist_ok=True)
+        downloader = MusicDownloader(download_dir=str(tmp_path), library_dir=str(mock_lib))
         album = ResolvedAlbum(
             url="https://music.youtube.com/playlist?list=OLAK5uy_test",
-            album_name="American Idiot",
-            artist_name="Green Day",
+            album_name="Mock Album",
+            artist_name="Mock Artist",
         )
-        success, folder = downloader.download_album(album)
-        self.assertTrue(success)
-        self.assertIn("American Idiot", folder)
-        mock_ydl_instance.download.assert_called_once_with(["https://music.youtube.com/playlist?list=OLAK5uy_test"])
+        with patch("modules.picard_engine.PicardEngine.process_and_relocate_album") as mock_reloc:
+            mock_reloc.return_value = tmp_path / "Mock Album"
+            success, folder = downloader.download_album(album)
+            self.assertTrue(success)
+            self.assertIn("Mock Album", folder)
+            mock_ydl_instance.download.assert_called_once_with(["https://music.youtube.com/playlist?list=OLAK5uy_test"])
 
         if Path(folder).exists():
             shutil.rmtree(folder, ignore_errors=True)
@@ -747,21 +818,23 @@ class TestMusicDownloader(unittest.TestCase):
         mock_ydl_instance = MagicMock()
         mock_ydl_cls.return_value.__enter__.return_value = mock_ydl_instance
         def fake_download(urls):
-            target_file = tmp_path / "American Idiot" / "00 - NA - Album.jpg"
+            target_file = tmp_path / "Mock Album Fail" / "00 - NA - Album.jpg"
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_text("image data")
         mock_ydl_instance.download.side_effect = fake_download
 
-        downloader = MusicDownloader(download_dir=str(tmp_path))
+        mock_lib = tmp_path / "mock_lib"
+        mock_lib.mkdir(parents=True, exist_ok=True)
+        downloader = MusicDownloader(download_dir=str(tmp_path), library_dir=str(mock_lib))
         album = ResolvedAlbum(
             url="https://music.youtube.com/playlist?list=OLAK5uy_test",
-            album_name="American Idiot",
-            artist_name="Green Day",
+            album_name="Mock Album Fail",
+            artist_name="Mock Artist Fail",
         )
         success, folder_or_err = downloader.download_album(album)
         self.assertFalse(success)
         self.assertIn("No se descargó ninguna pista", folder_or_err)
-        self.assertFalse((tmp_path / "American Idiot").exists())
+        self.assertFalse((tmp_path / "Mock Album Fail").exists())
 
     @patch("yt_dlp.YoutubeDL")
     def test_cookie_rotation_and_retry(self, mock_ydl_cls, tmp_path=Path("./test_mock_rotate")):
@@ -833,7 +906,7 @@ class TestMusicDownloader(unittest.TestCase):
         # Create an existing valid audio file (> 200 KB)
         (album_folder / "01 - suis - Catdays.m4a").write_bytes(b"0" * (300 * 1024))
 
-        downloader = MusicDownloader(download_dir=str(tmp_path))
+        downloader = MusicDownloader(download_dir=str(tmp_path), library_dir=str(tmp_path / "mock_lib"))
         album = ResolvedAlbum(
             url="https://music.youtube.com/playlist?list=OLAK5uy_test",
             album_name="Catdays",
@@ -922,7 +995,7 @@ class TestMusicDownloader(unittest.TestCase):
         tmp_path.mkdir(parents=True, exist_ok=True)
 
         try:
-            downloader = MusicDownloader(download_dir=tmp_path)
+            downloader = MusicDownloader(download_dir=tmp_path, library_dir=tmp_path / "mock_lib")
             mock_ydl = MagicMock()
             mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
 
@@ -1293,7 +1366,7 @@ class TestDownloadQueue(unittest.TestCase):
 
             mock_navidrome = MagicMock()
             # Album 1 already in Navidrome
-            mock_navidrome.find_album_match.side_effect = lambda alb, art: {"id": "alb_1"} if "Existente" in alb else None
+            mock_navidrome.find_album_match.side_effect = lambda alb, art, **kwargs: {"id": "alb_1"} if "Existente" in alb else None
 
             mock_listener = MagicMock()
 
@@ -1422,7 +1495,7 @@ class TestDownloadQueue(unittest.TestCase):
 
             # Track 1 already in Navidrome
             mock_navidrome = MagicMock()
-            mock_navidrome.find_best_match.side_effect = lambda title, artist: (
+            mock_navidrome.find_best_match.side_effect = lambda title, artist, **kwargs: (
                 {"id": "s1", "title": title, "album": "Random Access Memories"} if "Get Lucky" in title else None
             )
 
@@ -1641,12 +1714,94 @@ class TestDownloadQueue(unittest.TestCase):
         self.assertIn("💿 Discos", html_out)
         self.assertIn("🔢 Canciones", html_out)
         self.assertIn("🕒 Duración", html_out)
-        self.assertIn("6:35", html_out)
         self.assertIn("<details><summary>🎵 Ver Lista de Canciones</summary>", html_out)
-        self.assertIn("<b>01.</b> Track One (3:30)", html_out)
-        self.assertIn("<b>02.</b> Track Two (3:05)", html_out)
+        self.assertIn("<table bordered striped compact>", html_out)
+        self.assertIn("<tr><th align=\"center\">#</th><th align=\"left\">Título</th><th align=\"center\">Duración</th></tr>", html_out)
+        self.assertIn("<td align=\"center\">01</td><td align=\"left\">Track One</td><td align=\"center\">3:30</td>", html_out)
+        self.assertIn("<td align=\"center\">02</td><td align=\"left\">Track Two</td><td align=\"center\">3:05</td>", html_out)
         self.assertIn("🌐 Escuchar en Navidrome", html_out)
         self.assertIn("https://navidrome.example.com/#/album/abc", html_out)
+
+    def test_download_queue_build_album_progress_rich_html(self):
+        queue_manager = DownloadQueue(
+            downloader=MagicMock(),
+            navidrome=MagicMock(),
+            listener=MagicMock(),
+            win_dest="M:\\music\\downloads",
+            bot_token="test_token",
+        )
+        tracks = [
+            {"index": 1, "title": "Track One", "status": "done", "duration": 210},
+            {"index": 2, "title": "Track Two", "status": "downloading", "duration": 0, "pct": "(45%)"},
+            {"index": 3, "title": "Track Three", "status": "pending", "duration": 0},
+        ]
+        html_out = queue_manager._build_album_progress_rich_html(
+            album_name="Test Album",
+            artist_name="Test Artist",
+            tracks=tracks,
+            completed_count=1,
+            total_count=3,
+            current_track_title="Track Two",
+            dest_folder="M:\\music\\downloads\\Test Album",
+        )
+
+        self.assertIn("<h3>📥 Descargando: Test Album</h3>", html_out)
+        self.assertIn("<h4>👤 Test Artist</h4>", html_out)
+        self.assertIn("<details open>", html_out)
+        self.assertIn("<td align=\"center\">✅</td>", html_out)
+        self.assertIn("<td align=\"center\">⏳</td>", html_out)
+        self.assertIn("<td align=\"center\">⏸️</td>", html_out)
+        self.assertIn("📁 Destino", html_out)
+
+    @patch("requests.post")
+    def test_album_progress_streamer_draft_and_fallback(self, mock_post):
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.status_code = 200
+        mock_resp_ok.json.return_value = {"ok": True}
+        mock_post.return_value = mock_resp_ok
+
+        queue_manager = MagicMock()
+        queue_manager.bot_token = "12345:TOKEN"
+        queue_manager._format_duration.return_value = "3:30"
+        queue_manager._clean_rich_html.side_effect = lambda x: x
+        queue_manager._build_album_progress_rich_html.return_value = "<div>Mock HTML</div>"
+
+        mock_listener = MagicMock()
+        mock_listener.send_rich_message_draft.return_value = True
+        mock_listener.send_reply.return_value = 888
+        queue_manager.listener = mock_listener
+
+        album = ResolvedAlbum(url="https://music.youtube.com/playlist?list=123", album_name="Album X", artist_name="Artist Y")
+        tracks = ["Track 1", "Track 2"]
+        streamer = AlbumProgressStreamer(
+            queue=queue_manager,
+            chat_id="12345",
+            thread_id="99",
+            album=album,
+            tracks=tracks,
+            dest_folder="M:\\dest",
+        )
+
+        streamer.start()
+        self.assertTrue(mock_listener.send_rich_message_draft.called)
+
+        # Progress update
+        streamer.handle_progress({"status": "downloading", "info_dict": {"playlist_index": 1, "title": "Track 1"}})
+        streamer.handle_progress({"status": "finished", "info_dict": {"playlist_index": 1, "title": "Track 1", "duration": 210}})
+        self.assertEqual(streamer.tracks[0]["status"], "done")
+        self.assertEqual(streamer.tracks[1]["status"], "downloading")
+
+        # Test fallback when draft returns False
+        mock_listener.send_rich_message_draft.return_value = False
+        streamer.draft_supported = True
+        streamer._send_update(force=True)
+        self.assertFalse(streamer.draft_supported)
+        self.assertEqual(streamer.fallback_msg_id, 888)
+
+        # Finish cleanup edits message to completed state
+        streamer.finish(success=True)
+        mock_listener.edit_message_text.assert_called()
+
 
     @patch("requests.post")
     def test_download_queue_send_album_rich_notification(self, mock_post, tmp_path=Path("./test_q_rich")):
@@ -1766,6 +1921,127 @@ class TestDownloadQueue(unittest.TestCase):
             if tmp_path.exists():
                 shutil.rmtree(tmp_path, ignore_errors=True)
 
+    @patch.object(DownloadQueue, "_send_album_rich_notification")
+    def test_process_job_calls_rich_notification_when_relocated_to_library(self, mock_rich_notify, tmp_path=Path("./test_q_reloc_dl")):
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path, ignore_errors=True)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        lib_path = tmp_path / "final_library"
+        lib_path.mkdir(parents=True, exist_ok=True)
+        relocated_folder = lib_path / "Artist_Z" / "[2023] - Full_Album"
+        relocated_folder.mkdir(parents=True, exist_ok=True)
+
+        try:
+            mock_downloader = MagicMock()
+            mock_downloader.download_dir = tmp_path / "downloads"
+            mock_downloader.library_dir = lib_path
+            mock_downloader.sanitize_name = lambda s: s.replace(" ", "_")
+            mock_downloader.cookies_list = []
+            mock_downloader.verify_album_integrity.return_value = (False, 0, "No existe")
+            mock_downloader.download_album.return_value = (True, str(relocated_folder))
+
+            mock_listener = MagicMock()
+            queue_manager = DownloadQueue(
+                downloader=mock_downloader,
+                navidrome=None,
+                listener=mock_listener,
+                win_dest="M:\\music\\downloads",
+                bot_token="test_token",
+            )
+
+            album = ResolvedAlbum(
+                url="https://music.youtube.com/playlist?list=OLAK5uy_999",
+                album_name="Full Album",
+                artist_name="Artist Z",
+                tracks=["Track 1", "Track 2"],
+            )
+
+            job = DownloadJob(
+                job_id="test_reloc_album_job",
+                chat_id="12345",
+                thread_id="100",
+                title="Test Reloc Album",
+                albums=[album],
+                tracks=[],
+            )
+
+            queue_manager.enqueue(job)
+            queue_manager.queue.join()
+
+            # _send_album_rich_notification MUST be called with relocated_folder!
+            mock_rich_notify.assert_called_once_with("12345", "100", album, relocated_folder)
+        finally:
+            if tmp_path.exists():
+                shutil.rmtree(tmp_path, ignore_errors=True)
+
+    def test_downloader_cleans_playlist_comment_on_skip(self):
+        """Verifies that when an album/track is skipped because it's already in Navidrome or on disk,
+        the downloader cleans the playlist comment and removes it from state_tracker."""
+        mock_downloader = MagicMock()
+        mock_downloader.cookies_list = []
+        mock_downloader.sanitize_name = lambda s: s.replace(" ", "_")
+        mock_downloader.get_album_tracklist.return_value = [{"index": 1, "title": "Half-Truism"}]
+
+        mock_nav = MagicMock()
+        # Album exists in Navidrome
+        mock_nav.find_album_match.return_value = {"id": "alb_offspring", "name": "Rise And Fall, Rage And Grace"}
+        mock_nav.get_album_tracks.return_value = [{"id": "t1", "title": "Half-Truism"}]
+        mock_nav.get_playlists.return_value = [
+            {
+                "id": "pl_weekly",
+                "name": "ListenBrainz Weekly Jams",
+                "comment": "Tracks not found in library: Half-Truism by The Offspring",
+            }
+        ]
+
+        mock_listener = MagicMock()
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        # Pre-populate state tracker last_batch
+        tracker.save_last_batch(
+            playlist_name="ListenBrainz Weekly Jams",
+            batch_number=1,
+            batch_size=1,
+            total_batches=1,
+            albums=[{"album_name": "Rise And Fall, Rage And Grace"}],
+            tracks=[],
+        )
+
+        queue_manager = DownloadQueue(
+            downloader=mock_downloader,
+            navidrome=mock_nav,
+            listener=mock_listener,
+            win_dest="M:\\music\\downloads",
+            state_tracker=tracker,
+        )
+
+        alb = ResolvedAlbum(
+            url="https://music.youtube.com/playlist?list=OLAK_offspring",
+            album_name="Rise And Fall, Rage And Grace",
+            artist_name="The Offspring",
+            tracks=["Half-Truism"],
+        )
+
+        job = DownloadJob(
+            job_id="job_offspring",
+            chat_id="12345",
+            thread_id=None,
+            title="Playlist ListenBrainz Weekly Jams (Todos los lotes)",
+            albums=[alb],
+            tracks=[],
+        )
+
+        queue_manager.enqueue(job)
+        queue_manager.queue.join()
+
+        # Check that update_playlist_comment was called to clean the comment
+        mock_nav.update_playlist_comment.assert_called_once()
+        call_args = mock_nav.update_playlist_comment.call_args[0]
+        self.assertEqual(call_args[0], "pl_weekly")
+        self.assertNotIn("Half-Truism", call_args[1])
+
+        # Check that state_tracker was cleaned
+        last_batch = tracker.get_last_batch("ListenBrainz Weekly Jams")
+        self.assertEqual(len(last_batch.get("albums", [])), 0)
 
 
 class TestStateTrackerDiscovery(unittest.TestCase):
@@ -2516,9 +2792,586 @@ class TestDiscardAndIgnoreFeature(unittest.TestCase):
         listener.handle_update(update_restore)
         mock_restore.assert_called_once_with("123", None, "Tokyo Flash")
 
+    def test_titles_match_romaji_substring(self):
+        from modules.syncer import titles_match
+        # Romaji substring matching (Japanese vs Romaji)
+        self.assertTrue(titles_match("のびしろ", "Nobishiro - from the FIRST TAKE"))
+        self.assertTrue(titles_match("Nobishiro", "のびしろ"))
+        # Line edition variations
+        self.assertTrue(titles_match("Photograph", "Photograph - Live"))
+        self.assertTrue(titles_match("Photograph (Deluxe)", "Photograph"))
+        # Unrelated titles must not match
+        self.assertFalse(titles_match("Photograph", "Shape of You"))
+        self.assertFalse(titles_match("のびしろ", "Bling-Bang-Bang-Born"))
+
+    @patch("modules.syncer.YouTubeMusicResolver")
+    def test_syncer_homonymous_album_resolution_creepy_nuts(self, mock_resolver_cls):
+        """Verifies that an album like 'Ensemble Play' with multiple Navidrome album candidates
+        (single vs full album) checks all candidates and detects that 'のびしろ' is already present."""
+        from modules.syncer import process_playlist_text
+        mock_resolver = MagicMock()
+        mock_resolver_cls.return_value = mock_resolver
+
+        mock_nav = MagicMock()
+        # Navidrome returns two album matches for Ensemble Play:
+        # 1) Single with 1 track (Daten)
+        # 2) Full album with 11 tracks (including Nobishiro)
+        cand_single = {"id": "alb_daten", "name": "Ensemble Play", "songCount": 1}
+        cand_full = {"id": "alb_full", "name": "Ensemble Play", "songCount": 11}
+        mock_nav.find_all_album_matches.return_value = [cand_full, cand_single]
+
+        def fake_get_album_tracks(album_id):
+            if album_id == "alb_full":
+                return [
+                    {"id": "s1", "title": "堕天", "artist": "Creepy Nuts"},
+                    {"id": "s2", "title": "Nobishiro - from the FIRST TAKE", "artist": "Creepy Nuts"},
+                ]
+            return [{"id": "s1", "title": "堕天", "artist": "Creepy Nuts"}]
+
+        mock_nav.get_album_tracks.side_effect = fake_get_album_tracks
+        mock_nav.find_best_match.return_value = None
+
+        alb = ResolvedAlbum(
+            url="https://music.youtube.com/playlist?list=OLAK_ensemble",
+            album_name="Ensemble Play",
+            artist_name="Creepy Nuts",
+            tracks=["のびしろ"],
+            resolved_tracks=["Nobishiro"],
+        )
+        mock_res = ResolutionResult()
+        mock_res.albums = [alb]
+        mock_resolver.resolve.return_value = mock_res
+
+        mock_tg = MagicMock()
+        processed = process_playlist_text(
+            playlist_name="Descubrimiento Diario",
+            raw_text="Tracks not found in library: のびしろ",
+            navidrome=mock_nav,
+            telegram=mock_tg,
+            state_tracker=self.tracker,
+        )
+        self.assertTrue(processed)
+        # Because 'Nobishiro - from the FIRST TAKE' satisfied 'のびしろ', the album was omitted!
+        mock_tg.send_notification.assert_not_called()
+        last_b = self.tracker.get_last_batch("Descubrimiento Diario")
+        self.assertIsNotNone(last_b)
+        self.assertEqual(len(last_b.get("albums", [])), 0)
+        self.assertEqual(len(last_b.get("tracks", [])), 0)
+
+    def test_syncer_pre_check_saves_empty_batch(self):
+        from modules.syncer import process_playlist_text
+        mock_nav = MagicMock()
+        mock_nav.find_best_match.return_value = {"id": "s1", "title": "Song A", "artist": "Artist A"}
+        mock_tg = MagicMock()
+        processed = process_playlist_text(
+            playlist_name="ListenBrainz Daily Jams",
+            raw_text="Tracks not matched: Song A by Artist A",
+            navidrome=mock_nav,
+            telegram=mock_tg,
+            state_tracker=self.tracker,
+        )
+        self.assertTrue(processed)
+        mock_tg.send_notification.assert_not_called()
+        last_b = self.tracker.get_last_batch("ListenBrainz Daily Jams")
+        self.assertIsNotNone(last_b)
+        self.assertEqual(len(last_b.get("albums", [])), 0)
+        self.assertEqual(len(last_b.get("tracks", [])), 0)
+
+    def test_state_tracker_save_and_get_last_injected(self):
+        tracks = [
+            {"requested": "St. Jimmy", "title": "Are We the Waiting / St. Jimmy", "artist": "Green Day", "album": "American Idiot", "id": "tr1"}
+        ]
+        self.tracker.save_last_injected("Descubrimiento Diario", tracks)
+        saved = self.tracker.get_last_injected("Descubrimiento Diario")
+        self.assertIsNotNone(saved)
+        self.assertEqual(len(saved["tracks"]), 1)
+        self.assertEqual(saved["tracks"][0]["title"], "Are We the Waiting / St. Jimmy")
+
+        all_inj = self.tracker.get_last_injected()
+        self.assertIn("descubrimiento diario", all_inj)
+
+    def test_process_playlist_text_accumulates_injected_tracks(self):
+        from modules.syncer import process_playlist_text
+        mock_nav = MagicMock()
+        mock_nav.find_best_match.return_value = {
+            "id": "gd_3",
+            "title": "Are We the Waiting / St. Jimmy",
+            "artist": "Green Day",
+            "album": "American Idiot",
+        }
+        mock_tg = MagicMock()
+        accumulator = {}
+        processed = process_playlist_text(
+            playlist_name="Descubrimiento Diario",
+            raw_text="Tracks not found in library: St. Jimmy",
+            navidrome=mock_nav,
+            telegram=mock_tg,
+            state_tracker=self.tracker,
+            injected_accumulator=accumulator,
+        )
+        self.assertTrue(processed)
+        self.assertIn("Descubrimiento Diario", accumulator)
+        inj = accumulator["Descubrimiento Diario"]
+        self.assertEqual(len(inj), 1)
+        self.assertEqual(inj[0]["requested"], "St. Jimmy")
+        self.assertEqual(inj[0]["title"], "Are We the Waiting / St. Jimmy")
+        self.assertEqual(inj[0]["artist"], "Green Day")
+
+        persisted = self.tracker.get_last_injected("Descubrimiento Diario")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(len(persisted["tracks"]), 1)
+
+    def test_on_sync_command_delivers_rich_message_with_injected_songs(self):
+        from notifier import main
+        from modules.telegram import TelegramBotListener
+        from modules.state import StateTracker
+
+        mock_listener = MagicMock()
+        mock_tg = MagicMock()
+        mock_nav = MagicMock()
+        mock_nav.get_playlists.return_value = [
+            {"id": "p1", "name": "Descubrimiento Diario", "comment": "Tracks not found in library: St. Jimmy"}
+        ]
+        mock_nav.find_best_match.return_value = {
+            "id": "gd_3",
+            "title": "Are We the Waiting / St. Jimmy",
+            "artist": "Green Day",
+            "album": "American Idiot",
+        }
+
+        with patch("notifier.TelegramSender", return_value=mock_tg):
+            with patch("notifier.TelegramBotListener") as mock_tbl_cls:
+                instance = MagicMock()
+                mock_tbl_cls.return_value = instance
+                # Run sync command handler directly
+                handler = None
+                def capture_listener(**kwargs):
+                    nonlocal handler
+                    handler = kwargs.get("on_sync_command")
+                    return instance
+                mock_tbl_cls.side_effect = capture_listener
+
+                # We can call the bot /sync command by invoking the handler
+                # Or test format_injected_feedback directly
+                from notifier import format_injected_feedback
+                injected_data = {
+                    "Descubrimiento Diario": [
+                        {
+                            "requested": "St. Jimmy",
+                            "title": "Are We the Waiting / St. Jimmy",
+                            "artist": "Green Day",
+                            "album": "American Idiot",
+                            "id": "gd_3",
+                        }
+                    ]
+                }
+                html_txt, rich_blocks = format_injected_feedback(injected_data)
+                self.assertIn("Are We the Waiting / St. Jimmy", html_txt)
+                self.assertIn("Green Day", html_txt)
+                self.assertIn("coincide con: «St. Jimmy»", html_txt)
+                self.assertTrue(any(b.get("type") == "list" for b in rich_blocks))
+                self.assertTrue(any("St. Jimmy" in str(b) for b in rich_blocks))
+
+    def test_on_injected_command_handles_empty_and_populated(self):
+        from modules.telegram import TelegramBotListener
+        mock_sync = MagicMock()
+        mock_status = MagicMock()
+        mock_injected = MagicMock()
+
+        listener = TelegramBotListener(
+            bot_token="test_token",
+            authorized_chat_ids=["123"],
+            on_sync_command=mock_sync,
+            on_status_command=mock_status,
+            on_injected_command=mock_injected,
+        )
+
+        update = {
+            "message": {
+                "chat": {"id": 123},
+                "text": "/inyectadas",
+            }
+        }
+        listener.handle_update(update)
+        mock_injected.assert_called_once_with("123", None)
+
+    def test_batch_progress_html_reflects_failures_not_100(self):
+        """Verifies that when items fail, progress shows actual success rate and does NOT show 100%."""
+        mock_downloader = MagicMock()
+        queue_mgr = DownloadQueue(downloader=mock_downloader, navidrome=MagicMock(), listener=MagicMock(), win_dest="M:\\music")
+        
+        items = [
+            {"index": 1, "name": "Item 1", "status": "done"},
+            {"index": 2, "name": "Item 2", "status": "skipped"},
+            {"index": 3, "name": "Item 3", "status": "failed"},
+        ]
+        
+        # When finished with 1 failure out of 3 (2 successes = 66%)
+        html_out = queue_mgr._build_batch_progress_rich_html(
+            title="Test Batch",
+            items=items,
+            completed_count=3,
+            total_count=3,
+            finished=True,
+        )
+        self.assertNotIn("100%", html_out)
+        self.assertIn("66%", html_out)
+        self.assertIn("⚠️ ¡Lote finalizado con 1 error!", html_out)
+        self.assertIn("(2/3 · ⚠️ 1 con error)", html_out)
+
+    def test_retry_sessions_in_download_queue(self):
+        """Verifies storing, retrieving, and popping retry sessions."""
+        import time
+        mock_downloader = MagicMock()
+        queue_mgr = DownloadQueue(downloader=mock_downloader, navidrome=MagicMock(), listener=MagicMock(), win_dest="M:\\music")
+        
+        token = "test_tok1"
+        data = {
+            "chat_id": "123",
+            "title": "Batch Test",
+            "albums": [{"album_name": "A1", "artist_name": "Art1", "url": "http://1"}],
+            "tracks": [],
+            "created_at": time.time(),
+        }
+        queue_mgr.save_retry_session(token, data)
+        retrieved = queue_mgr.get_retry_session(token)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved["title"], "Batch Test")
+        
+        popped = queue_mgr.pop_retry_session(token)
+        self.assertEqual(popped["title"], "Batch Test")
+        self.assertIsNone(queue_mgr.get_retry_session(token))
+
+    def test_listener_dispatches_retry_fail(self):
+        """Verifies that TelegramBotListener dispatches retry_fail callback to on_retry_failed_callback."""
+        from modules.telegram import TelegramBotListener
+        mock_sync = MagicMock()
+        mock_status = MagicMock()
+        mock_retry = MagicMock()
+
+        listener = TelegramBotListener(
+            bot_token="test_token",
+            authorized_chat_ids=["123"],
+            on_sync_command=mock_sync,
+            on_status_command=mock_status,
+            on_retry_failed_callback=mock_retry,
+        )
+        listener.answer_callback_query = MagicMock()
+
+        update = {
+            "callback_query": {
+                "id": "cq_999",
+                "message": {
+                    "chat": {"id": 123},
+                    "message_id": 456,
+                    "message_thread_id": 789,
+                },
+                "data": "retry_fail:abc12345",
+            }
+        }
+        listener.handle_update(update)
+        mock_retry.assert_called_once_with("123", "789", 456, "cq_999", "abc12345")
+
+
+
+class TestPlaylistAligner(unittest.TestCase):
+
+    def setUp(self):
+        from modules.playlist_aligner import _LBZ_CACHE
+        _LBZ_CACHE.clear()
+
+    def test_normalize_text(self):
+        from modules.playlist_aligner import normalize_text
+        self.assertEqual(normalize_text("01 - Song Title (Remastered 2020)"), "song title")
+        self.assertEqual(normalize_text("Don’t Stop Believin’"), "dont stop believin")
+        self.assertEqual(normalize_text("¡Atrévete te, te!"), "atrévete te te")
+
+    def test_tracks_match(self):
+        from modules.playlist_aligner import tracks_match
+        # Exact match
+        self.assertTrue(tracks_match("Holiday", "Green Day", "Holiday", "Green Day"))
+        # With subtitle/parenthetical
+        self.assertTrue(tracks_match("Higher Ground", "Red Hot Chili Peppers", "Higher Ground (Remastered 2003)", "Red Hot Chili Peppers"))
+        # Japanese translation / Hepburn / alias
+        self.assertTrue(tracks_match("TAIDADA", "ずっと真夜中でいいのに。", "TAIDADA", "ZUTOMAYO"))
+        # Featured artist
+        self.assertTrue(tracks_match("Atrévete te, te!", "Calle 13", "Atrévete-te-te", "Calle 13 feat. Edgar Abraham"))
+        # Different song
+        self.assertFalse(tracks_match("Song A", "Artist A", "Song B", "Artist A"))
+
+    def test_align_tracks_to_official_order(self):
+        from modules.playlist_aligner import align_tracks_to_official_order
+        official = [
+            {"title": "Track 1", "artist": "Artist A"},
+            {"title": "Track 2", "artist": "Artist B"},
+            {"title": "Track 3", "artist": "Artist C"},
+            {"title": "Track 4", "artist": "Artist D"},
+        ]
+        # Current pool is scrambled / out of order
+        pool = [
+            {"id": "s4", "title": "Track 4", "artist": "Artist D"},
+            {"id": "s1", "title": "Track 1", "artist": "Artist A"},
+            {"id": "s3", "title": "Track 3", "artist": "Artist C"},
+        ]
+        aligned = align_tracks_to_official_order(official, pool)
+        # Expected order: s1 (track 1), s3 (track 3), s4 (track 4)
+        self.assertEqual(aligned, ["s1", "s3", "s4"])
+
+    def test_align_tracks_preserves_unmatched_leftovers(self):
+        from modules.playlist_aligner import align_tracks_to_official_order
+        official = [
+            {"title": "Track 1", "artist": "Artist A"},
+        ]
+        pool = [
+            {"id": "s_extra", "title": "Unrelated Song", "artist": "Someone Else"},
+            {"id": "s1", "title": "Track 1", "artist": "Artist A"},
+        ]
+        aligned = align_tracks_to_official_order(official, pool)
+        # Official track first, then leftovers at the end
+        self.assertEqual(aligned, ["s1", "s_extra"])
+
+    @patch("modules.playlist_aligner.requests.get")
+    def test_reorder_playlist_if_needed_with_official_url(self, mock_get):
+        from modules.playlist_aligner import reorder_playlist_if_needed
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "playlist": {
+                "track": [
+                    {"title": "Song 1", "creator": "Artist 1"},
+                    {"title": "Song 2", "creator": "Artist 2"},
+                    {"title": "Song 3", "creator": "Artist 3"},
+                ]
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        mock_nav = MagicMock()
+        mock_nav.get_playlist_details.return_value = {
+            "id": "pl_1",
+            "name": "Daily Jams",
+            "entry": [
+                {"id": "s1", "title": "Song 1", "artist": "Artist 1"},
+                {"id": "s3", "title": "Song 3", "artist": "Artist 3"},
+            ]
+        }
+        mock_nav.set_playlist_tracks.return_value = True
+
+        comment = "Imported from playlist https://listenbrainz.org/playlist/6ea95517-ca7b-43e8-ba95-cfa982f01bd0"
+        # We auto-inject song 2 (which was previously missing)
+        new_songs = [{"id": "s2", "title": "Song 2", "artist": "Artist 2"}]
+
+        success = reorder_playlist_if_needed(
+            navidrome=mock_nav,
+            playlist_id="pl_1",
+            comment=comment,
+            new_songs=new_songs,
+        )
+        self.assertTrue(success)
+        # Verify set_playlist_tracks was called with exact official sequence [s1, s2, s3] instead of appending s2 at end!
+        mock_nav.set_playlist_tracks.assert_called_once_with("pl_1", ["s1", "s2", "s3"])
+
+    def test_state_tracker_failed_items_registry(self):
+        from modules.state import StateTracker
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+
+        self.assertFalse(tracker.is_failed_blocked("Song A", "Artist A"))
+
+        # 1. Record transient failure (1 attempt)
+        tracker.record_failed_item("Song A", "Artist A", reason="Network timeout")
+        self.assertFalse(tracker.is_failed_blocked("Song A", "Artist A", max_failures=3))
+
+        # 2. Record 3 failures -> should become blocked
+        tracker.record_failed_item("Song A", "Artist A", reason="Sign in to confirm you're not a bot")
+        tracker.record_failed_item("Song A", "Artist A", reason="Rate-limited")
+        self.assertTrue(tracker.is_failed_blocked("Song A", "Artist A", max_failures=3))
+
+        # 3. Record permanent failure (e.g. video unavailable / regional block)
+        tracker.record_failed_item("Song B", "Artist B", reason="Video unavailable in your country")
+        self.assertTrue(tracker.is_failed_blocked("Song B", "Artist B"))
+
+        # 4. Clear registry
+        items = tracker.get_failed_items()
+        self.assertEqual(len(items), 2)
+        cleared = tracker.clear_failed_items()
+        self.assertEqual(cleared, 2)
+        self.assertFalse(tracker.is_failed_blocked("Song A", "Artist A"))
+        self.assertFalse(tracker.is_failed_blocked("Song B", "Artist B"))
+
+    def test_folder_consolidator_unification(self):
+        from modules.consolidator import FolderConsolidator
+        tmp_lib = Path(tempfile.mkdtemp(prefix="test_lib_"))
+        tmp_dl = Path(tempfile.mkdtemp(prefix="test_dl_"))
+
+        try:
+            # Canonical folder in library
+            canon_dir = tmp_lib / "General" / "Miranda!" / "[2004] - Sin Restricciones"
+            canon_dir.mkdir(parents=True, exist_ok=True)
+            (canon_dir / "01 - Yo Te Dire.m4a").write_text("audio1")
+
+            # Fragmented folder in download cache
+            frag_dir = tmp_dl / "Sin Restricciones"
+            frag_dir.mkdir(parents=True, exist_ok=True)
+            (frag_dir / "02 - Don.m4a").write_text("audio2")
+
+            mock_nav = MagicMock()
+            consolidator = FolderConsolidator(
+                library_dir=tmp_lib,
+                download_dir=tmp_dl,
+                navidrome=mock_nav,
+            )
+
+            results = consolidator.consolidate_all(dry_run=False)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["moved_files"], 1)
+
+            # Check that 02 - Don.m4a was moved into canonical directory
+            self.assertTrue((canon_dir / "02 - Don.m4a").exists())
+            # Check that fragmented source directory was cleaned up
+            self.assertFalse(frag_dir.exists())
+            # Check that Navidrome scan was triggered
+            mock_nav.start_scan.assert_called_once_with(full_scan=False)
+        finally:
+            shutil.rmtree(tmp_lib, ignore_errors=True)
+            shutil.rmtree(tmp_dl, ignore_errors=True)
+
+    def test_incomplete_album_auditor(self):
+        from modules.auditor import IncompleteAlbumAuditor
+        from modules.state import StateTracker
+
+        mock_nav = MagicMock()
+        mock_nav.get_album_list.return_value = [
+            {"id": "alb_1", "name": "Honestidad Brutal", "artist": "Andrés Calamaro", "coverArt": "cov1"},
+            {"id": "alb_2", "name": "_Singles", "artist": "Various Artists"},
+            {"id": "alb_3", "name": "Blocked Album", "artist": "Blocked Artist"},
+        ]
+        # alb_1 has 1 song in Navidrome
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1}]
+
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        tracker.record_failed_item("Blocked Album", "Blocked Artist", reason="Video unavailable")
+
+        auditor = IncompleteAlbumAuditor(
+            navidrome=mock_nav,
+            state_tracker=tracker,
+        )
+
+        incomplete = auditor.find_incomplete_albums()
+        self.assertEqual(len(incomplete), 1)
+        self.assertEqual(incomplete[0]["album_name"], "Honestidad Brutal")
+        self.assertEqual(incomplete[0]["artist_name"], "Andrés Calamaro")
+
+    def test_nightly_download_manager_pipeline(self):
+        from modules.nightly import NightlyDownloadManager
+        from modules.state import StateTracker
+
+        mock_nav = MagicMock()
+        mock_nav.get_album_list.return_value = [
+            {"id": "alb_1", "name": "Sin Restricciones", "artist": "Miranda!"}
+        ]
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Yo Te Dire", "track": 1}]
+
+        mock_queue = MagicMock()
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        mock_tg = MagicMock()
+
+        mgr = NightlyDownloadManager(
+            navidrome=mock_nav,
+            download_queue=mock_queue,
+            state_tracker=tracker,
+            telegram_sender=mock_tg,
+        )
+
+        summary = mgr.run_maintenance(max_albums=10, dry_run=False)
+        self.assertEqual(summary["incomplete_detected"], 1)
+        self.assertEqual(summary["enqueued_for_download"], 1)
+        mock_queue.enqueue.assert_called_once()
+        mock_tg.send_notification.assert_called_once()
+
+    def test_dispatcher_maintenance_commands(self):
+        from modules.telegram.dispatcher import dispatch_update
+
+        mock_listener = MagicMock()
+        mock_listener.authorized_chat_ids = {"123"}
+        mock_listener.on_incompletos_command = MagicMock()
+        mock_listener.on_unificar_command = MagicMock()
+        mock_listener.on_noche_command = MagicMock()
+        mock_listener.on_fallidos_command = MagicMock()
+        mock_listener.on_reintentar_fallidos_command = MagicMock()
+
+        update_incompletos = {
+            "message": {"chat": {"id": 123}, "text": "/incompletos", "message_id": 1}
+        }
+        dispatch_update(mock_listener, update_incompletos)
+        mock_listener.on_incompletos_command.assert_called_once_with("123", None)
+
+        update_unificar = {
+            "message": {"chat": {"id": 123}, "text": "/unificar", "message_id": 2}
+        }
+        dispatch_update(mock_listener, update_unificar)
+        mock_listener.on_unificar_command.assert_called_once_with("123", None)
+
+        update_noche = {
+            "message": {"chat": {"id": 123}, "text": "/noche", "message_id": 3}
+        }
+        dispatch_update(mock_listener, update_noche)
+        mock_listener.on_noche_command.assert_called_once_with("123", None)
+
+        update_fallidos = {
+            "message": {"chat": {"id": 123}, "text": "/fallidos", "message_id": 4}
+        }
+        dispatch_update(mock_listener, update_fallidos)
+        mock_listener.on_fallidos_command.assert_called_once_with("123", None)
+
+        update_completar = {
+            "message": {"chat": {"id": 123}, "text": "/completar 5", "message_id": 6}
+        }
+        dispatch_update(mock_listener, update_completar)
+        mock_listener.on_completar_command.assert_called_once_with("123", None, "5")
+
+    def test_completar_handler_and_callback(self):
+        from handlers.system import SystemHandler
+        from modules.state import StateTracker
+
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        mock_queue = MagicMock()
+        mock_nav = MagicMock()
+        mock_nav.get_album_list.return_value = [
+            {"id": "alb_1", "name": "Honestidad Brutal", "artist": "Andrés Calamaro"}
+        ]
+        mock_nav.get_album_tracks.return_value = [{"id": "s1", "title": "Te Quiero Igual", "track": 1}]
+        mock_listener = MagicMock()
+
+        handler = SystemHandler(
+            state_tracker=tracker,
+            download_queue=mock_queue,
+            navidrome=mock_nav,
+            discoverer=MagicMock(),
+            target_names=set(),
+            default_max_albums=10,
+            daemon_interval=30,
+            nav_url="https://mock.nav",
+            download_music_dir="/downloads",
+            library_music_dir="/music",
+        )
+        handler.set_listener(mock_listener)
+
+        # 1. Test interactive proposal
+        handler.on_completar_command("123", None, "5")
+        mock_listener.send_reply.assert_called_once()
+        saved_batch = tracker.get_incomplete_batch()
+        self.assertEqual(len(saved_batch), 1)
+
+        # 2. Test callback execution
+        handler.on_download_incomplete_batch_callback("123", None, 101, "5")
+        mock_queue.enqueue.assert_called_once()
+        mock_listener.edit_message_text.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 
 

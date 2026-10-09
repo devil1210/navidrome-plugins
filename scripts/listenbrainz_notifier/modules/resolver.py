@@ -189,6 +189,81 @@ class YouTubeMusicResolver:
         result.tracks.sort(key=lambda t: t.first_index)
         return result
 
+    def resolve_album_by_name(self, album_name: str, artist_name: str) -> Optional[ResolvedAlbum]:
+        """Resolves an album and artist name to an official YouTube Music album."""
+        if not album_name or not artist_name:
+            return None
+
+        clean_alb = re.sub(r"[\"'“”«»#]", " ", album_name).strip()
+        clean_alb = re.sub(r"^[-_\s.]+", "", clean_alb).strip()
+        clean_art = re.sub(r"[\"'“”«»#]", " ", artist_name).strip()
+        clean_art = re.sub(r"^[-_\s.]+", "", clean_art).strip()
+
+        queries = [
+            f"{clean_alb} {clean_art}".strip(),
+            f"{album_name} {artist_name}".strip(),
+            f"{clean_alb}".strip(),
+        ]
+        if any(sep in clean_art for sep in ["&", "feat", "CV:", "CV.", "•", "×"]):
+            main_art = re.split(r"&|feat|\bCV[:.]|•|×", clean_art, flags=re.IGNORECASE)[0].strip()
+            if main_art:
+                queries.append(f"{clean_alb} {main_art}".strip())
+
+        for q in queries:
+            if not q:
+                continue
+            try:
+                hits = self.yt.search(q, filter="albums", limit=3)
+                if hits:
+                    top = hits[0]
+                    browse_id = top.get("browseId")
+                    if browse_id:
+                        audio_pid = self._get_audio_playlist_id(browse_id)
+                        if audio_pid:
+                            real_name = top.get("title") or album_name
+                            real_artist = top.get("artists", [{}])[0].get("name", artist_name)
+                            thumb_url = None
+                            thumbs = top.get("thumbnails", [])
+                            if thumbs:
+                                thumb_url = re.sub(r"=w\d+-h\d+.*", "=w1200-h1200-l90-rj", thumbs[-1].get("url", ""))
+                            return ResolvedAlbum(
+                                url=f"https://music.youtube.com/playlist?list={audio_pid}",
+                                album_name=real_name,
+                                artist_name=real_artist,
+                                cover_url=thumb_url,
+                                year=top.get("year"),
+                            )
+            except Exception as e:
+                logger.debug("Error searching album with query '%s': %s", q, e)
+        return None
+
+    def resolve_track_to_album(self, track_title: str, artist_name: str) -> Optional[ResolvedAlbum]:
+        """Resolves a single song to its official studio album."""
+        try:
+            q = f"{track_title} {artist_name}".strip()
+            hits = self.yt.search(q, filter="songs", limit=1)
+            if hits:
+                top = hits[0]
+                album_info = top.get("album")
+                if album_info and album_info.get("id"):
+                    audio_pid = self._get_audio_playlist_id(album_info["id"])
+                    if audio_pid:
+                        real_album = album_info.get("name")
+                        real_artist = top.get("artists", [{}])[0].get("name", artist_name)
+                        thumb_url = None
+                        thumbs = top.get("thumbnails", [])
+                        if thumbs:
+                            thumb_url = re.sub(r"=w\d+-h\d+.*", "=w1200-h1200-l90-rj", thumbs[-1].get("url", ""))
+                        return ResolvedAlbum(
+                            url=f"https://music.youtube.com/playlist?list={audio_pid}",
+                            album_name=real_album,
+                            artist_name=real_artist,
+                            cover_url=thumb_url,
+                        )
+        except Exception as e:
+            logger.debug("Error resolving track '%s' to album: %s", track_title, e)
+        return None
+
 
 class UniversalResolver:
     """
@@ -230,9 +305,23 @@ class UniversalResolver:
 
         # 1. Check for playlist/album parameter
         list_id = qs.get("list", [None])[0]
-        if list_id and not list_id.startswith("RD"):
-            # If it's an official album playlist (OLAK5uy_...)
-            if list_id.startswith("OLAK5uy_"):
+        if list_id:
+            if list_id.startswith("RD"):
+                video_id = qs.get("v", [None])[0]
+                if not video_id and "youtu.be" in parsed.netloc:
+                    video_id = parsed.path.lstrip("/").split("/")[0].split("?")[0]
+                if not video_id:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "⚠️ El enlace proporcionado es una <b>Radio / Mix dinámico</b> de YouTube (<code>list=RD...</code>).\n"
+                            "Este tipo de listas son infinitas y no pertenecen a un álbum estático.\n\n"
+                            "💡 <i>Por favor reproduce una canción o abre el álbum oficial para enviarlo.</i>"
+                        )
+                    }
+                logger.info("Ignoring dynamic radio playlist %s, falling back to active song %s", list_id, video_id)
+            elif list_id.startswith("OLAK5uy_"):
+                # If it's an official album playlist (OLAK5uy_...)
                 album_url = f"https://music.youtube.com/playlist?list={list_id}"
                 try:
                     pl = self.yt.get_playlist(list_id)

@@ -79,12 +79,13 @@ You can customize `message_title` and `message_body` templates using placeholder
 
 #### Song List Formatting (`{songs}`)
 Depending on your selected `telegram_parse_mode`:
-- **HTML**: Rendered as a structured HTML list `<ul>` / `<li>`:
+- **HTML**: Rendered as a compact structured table (`<table bordered striped compact>`):
   ```html
-  <ul>
-    <li><b>01.</b> Come Together (4:20)</li>
-    <li><b>02.</b> Something (3:03)</li>
-  </ul>
+  <table bordered striped compact>
+    <tr><th align="center">#</th><th align="left">Título</th><th align="center">Duración</th></tr>
+    <tr><td align="center">01</td><td align="left">Come Together</td><td align="center">4:20</td></tr>
+    <tr><td align="center">02</td><td align="left">Something</td><td align="center">3:03</td></tr>
+  </table>
   ```
 - **Markdown / MarkdownV2**: Rendered as plain text lines, with special characters escaped automatically for `MarkdownV2`:
   ```text
@@ -94,13 +95,14 @@ Depending on your selected `telegram_parse_mode`:
 
 
 If the album contains tracks from multiple discs, the `{songs}` list will automatically group them by disc:
-- **HTML**: Rendered using nested `<details open>` elements for each disc:
+- **HTML**: Rendered using nested `<details open>` elements for each disc with an inner table:
   ```html
   <details open>
     <summary>💿 Disco 1</summary>
-    <ul>
-      <li><b>01.</b> Song A (3:00)</li>
-    </ul>
+    <table bordered striped compact>
+      <tr><th align="center">#</th><th align="left">Título</th><th align="center">Duración</th></tr>
+      <tr><td align="center">01</td><td align="left">Song A</td><td align="center">3:00</td></tr>
+    </table>
   </details>
   ```
 - **Markdown / MarkdownV2**: Rendered with text disc headers:

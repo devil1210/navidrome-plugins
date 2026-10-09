@@ -1,13 +1,14 @@
 {
   "name": "ND Metadata",
-  "version": "1.4.2",
-  "description": "Multi-language text metadata agent supporting Wikipedia, Last.fm, Genius, Apple Music, Deezer and Discogs with intelligent junk filter, configurable source priority, auto-translation and artist image reset controls.",
+  "version": "1.5.0",
+  "description": "Multi-language text metadata and image agent supporting Wikipedia, Last.fm, Genius, Apple Music, Deezer and Discogs with auto-refresh on song playback, intelligent junk filter, configurable priority and auto-translation.",
   "author": "Antigravity",
   "website": "https://github.com/devil1210/navidrome-plugins",
   "permissions": {
     "http": {
-      "reason": "Fetch text metadata and translate missing descriptions",
+      "reason": "Fetch text metadata, artist images and synchronize playback updates with local service",
       "requiredHosts": [
+        "*",
         "ws.audioscrobbler.com",
         "api.mymemory.translated.net",
         "genius.com",
@@ -23,14 +24,40 @@
         "fr.wikipedia.org",
         "de.wikipedia.org",
         "pt.wikipedia.org",
-        "it.wikipedia.org"
+        "it.wikipedia.org",
+        "translate.googleapis.com"
       ]
+    },
+    "kvstore": {
+      "reason": "Almacenar marcas de tiempo de actualizacion de artistas para evitar consultas repetitivas dentro del intervalo configurado",
+      "maxSize": "100KB"
+    },
+    "users": {
+      "reason": "Requerido por la capacidad scrobbler para asociar la reproduccion de canciones"
     }
   },
   "config": {
     "schema": {
       "type": "object",
       "properties": {
+        "enable_playback_refresh": {
+          "type": "boolean",
+          "title": "Actualizar Biografia e Imagen al Reproducir",
+          "default": true,
+          "description": "Actualiza automaticamente la biografia en espanol y la foto HD del artista cuando alguien reproduzca una cancion si ha vencido el intervalo."
+        },
+        "refresh_interval_days": {
+          "type": "integer",
+          "title": "Intervalo Minimo de Actualizacion (Dias)",
+          "default": 7,
+          "description": "Dias minimos que deben transcurrir desde la ultima actualizacion antes de volver a consultar biografia e imagen (por defecto 7 dias / 1 semana)."
+        },
+        "sync_service_url": {
+          "type": "string",
+          "title": "URL del Servicio de Sincronizacion Local",
+          "default": "http://127.0.0.1:4535/sync_artist",
+          "description": "Endpoint HTTP local en el servidor para aplicar las actualizaciones directas a la base de datos de Navidrome."
+        },
         "source_priority": {
           "type": "string",
           "title": "Orden de Prioridad de Fuentes (Source Priority)",
@@ -45,27 +72,33 @@
         },
         "reset_artist_images": {
           "type": "boolean",
-          "title": "Refrescar Imagen de Artista al Agregar Álbumes",
+          "title": "Refrescar Imagen de Artista al Agregar Albumes",
           "default": true,
-          "description": "Si está activado, vacía las URLs de imagen previas al detectar un nuevo álbum para obligar a Navidrome a buscar fotos frescas del artista."
+          "description": "Si esta activado, vacia las URLs de imagen previas al detectar un nuevo album para obligar a Navidrome a buscar fotos frescas del artista."
         },
         "enable_auto_translate": {
           "type": "boolean",
           "title": "Enable Automatic Translation",
           "default": true,
           "description": "Automatically translate biographies to preferred language if no native biography is available"
-        },
-        "refresh_interval_days": {
-          "type": "integer",
-          "title": "Artist Bio Refresh Interval (Days)",
-          "default": 0,
-          "description": "Days before refreshing artist info. Set to 0 to ALWAYS fetch fresh info when adding an album or querying."
         }
       }
     },
     "uiSchema": {
       "type": "VerticalLayout",
       "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/enable_playback_refresh"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/refresh_interval_days"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/sync_service_url"
+        },
         {
           "type": "Control",
           "scope": "#/properties/source_priority"
@@ -81,10 +114,6 @@
         {
           "type": "Control",
           "scope": "#/properties/enable_auto_translate"
-        },
-        {
-          "type": "Control",
-          "scope": "#/properties/refresh_interval_days"
         }
       ]
     }

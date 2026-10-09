@@ -1,0 +1,19 @@
+[Unit]
+Description=Navidrome Artist Biography and Image Background Updater
+After=network.target navidrome.service
+Wants=navidrome.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/navidrome
+ExecStart=/usr/bin/python3 /opt/navidrome-scripts/navidrome_artist_updater.py
+Restart=always
+RestartSec=5
+Environment=NAVIDROME_DB=/var/lib/navidrome/navidrome.db
+Environment=NAVIDROME_BIN=/opt/navidrome/navidrome
+Environment=NAVIDROME_CONFIG=/var/lib/navidrome/navidrome.toml
+Environment=UPDATER_PORT=4535
+
+[Install]
+WantedBy=multi-user.target

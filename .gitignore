@@ -3,6 +3,12 @@
 .env.local
 *.env
 .state.json
+notifier_state.json
+*state*.json
+*cookies*.txt
+*.cookie*
+*.cookies
+*.token*
 Lista.md
 demora.txt
 roma1.txt
@@ -14,6 +20,8 @@ roma1.txt
 .download_queue.json
 lbz_recs_cache.json
 .lbz_cache.json
+MagicMock/
+scratch_*.py
 
 # Audio and media files
 *.m4a
@@ -33,6 +41,7 @@ scratch/
 General/
 Soundtracks/
 J-Music/
+Compilaciones/
 
 # Compiled WASM binaries & NDP packages
 *.wasm
@@ -48,4 +57,20 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.claude/
+.gitnexus/
+.agents/skills/
 
+# Local tools and personal extensions
+edge-extension/
+telegramtheme/
+scripts/inspect_*.py
+scripts/debug_*.py
+scripts/step_debug.py
+scripts/parse_cookie_domains.py
+scripts/check_cookies.py
+scripts/test_auth_headers.py
+scripts/test_culprits.py
+scripts/test_google_trans.py
+scripts/test_rate_limit.py
+scripts/test_wiki.py

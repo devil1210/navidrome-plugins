@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
 	"github.com/navidrome/navidrome/plugins/pdk/go/lifecycle"
 	"github.com/navidrome/navidrome/plugins/pdk/go/metadata"
 	"github.com/navidrome/navidrome/plugins/pdk/go/pdk"
+	"github.com/navidrome/navidrome/plugins/pdk/go/scrobbler"
+	"github.com/navidrome/navidrome/plugins/pdk/go/types"
 )
 
 const (
@@ -22,16 +26,19 @@ func init() {
 	p := &ndMetadataPlugin{}
 	lifecycle.Register(p)
 	metadata.Register(p)
+	scrobbler.Register(p)
 }
 
 var (
 	_ lifecycle.InitProvider           = (*ndMetadataPlugin)(nil)
 	_ metadata.ArtistBiographyProvider = (*ndMetadataPlugin)(nil)
+	_ metadata.ArtistImagesProvider    = (*ndMetadataPlugin)(nil)
 	_ metadata.AlbumInfoProvider       = (*ndMetadataPlugin)(nil)
+	_ scrobbler.Scrobbler              = (*ndMetadataPlugin)(nil)
 )
 
 func (p *ndMetadataPlugin) OnInit() error {
-	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.4.2 (Junk Filter & Multi-Source Priority) initialized")
+	pdk.Log(pdk.LogInfo, "ND Metadata Plugin v1.5.0 (Auto-Refresh on Playback, HD Images & Junk Filter) initialized")
 	return nil
 }
 
@@ -162,6 +169,35 @@ func isResetArtistImagesEnabled() bool {
 	}
 	lower := strings.ToLower(strings.TrimSpace(cfg))
 	return lower == "true" || lower == "1" || lower == "yes"
+}
+
+func isPlaybackRefreshEnabled() bool {
+	cfg, ok := host.ConfigGet("enable_playback_refresh")
+	if !ok {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(cfg))
+	return lower == "true" || lower == "1" || lower == "yes"
+}
+
+func getRefreshIntervalDays() int64 {
+	cfg, ok := host.ConfigGet("refresh_interval_days")
+	if !ok || strings.TrimSpace(cfg) == "" {
+		return 7
+	}
+	val, err := strconv.ParseInt(strings.TrimSpace(cfg), 10, 64)
+	if err != nil || val <= 0 {
+		return 7
+	}
+	return val
+}
+
+func getSyncServiceURL() string {
+	cfg, ok := host.ConfigGet("sync_service_url")
+	if !ok || strings.TrimSpace(cfg) == "" {
+		return "http://127.0.0.1:4535/sync_artist"
+	}
+	return strings.TrimSpace(cfg)
 }
 
 func cleanBioText(text string) string {
@@ -370,20 +406,84 @@ func fetchGeniusBio(artist string) (string, error) {
 	return "", fmt.Errorf("no valid Genius bio extract")
 }
 
-func translateText(text string, sourceLang string, targetLang string) (string, error) {
-	if len(text) == 0 {
-		return text, nil
+func isLikelyEnglish(text string) bool {
+	lower := " " + strings.ToLower(text) + " "
+	enMarkers := []string{" the ", " is ", " and ", " of ", " to ", " with ", " in ", " was ", " her ", " his ", " that ", " for ", " at ", " who ", " has ", " she ", " he "}
+	esMarkers := []string{" el ", " la ", " los ", " las ", " de ", " en ", " y ", " que ", " con ", " por ", " para ", " es ", " su ", " una ", " un ", " como "}
+	enCount := 0
+	for _, w := range enMarkers {
+		if strings.Contains(lower, w) {
+			enCount++
+		}
 	}
+	esCount := 0
+	for _, w := range esMarkers {
+		if strings.Contains(lower, w) {
+			esCount++
+		}
+	}
+	return enCount > esCount && enCount >= 3
+}
 
-	queryText := text
-	if len(queryText) > 800 {
-		queryText = queryText[:800]
+func translateGoogle(text string, targetLang string) (string, error) {
+	if len(strings.TrimSpace(text)) == 0 {
+		return "", nil
+	}
+	endpoint := fmt.Sprintf("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=%s&dt=t&q=%s",
+		targetLang, url.QueryEscape(text))
+	req := host.HTTPRequest{
+		Method: "GET",
+		URL:    endpoint,
+		Headers: map[string]string{
+			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+		},
+		TimeoutMs: 8000,
+	}
+	resp, err := host.HTTPSend(req)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("google translate returned status %d", resp.StatusCode)
+	}
+	var raw []interface{}
+	if err := json.Unmarshal(resp.Body, &raw); err != nil {
+		return "", err
+	}
+	if len(raw) == 0 {
+		return "", fmt.Errorf("empty google translate response")
+	}
+	parts, ok := raw[0].([]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid google translate parts format")
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if pair, ok := p.([]interface{}); ok && len(pair) > 0 {
+			if str, ok := pair[0].(string); ok {
+				sb.WriteString(str)
+			}
+		}
+	}
+	res := strings.TrimSpace(sb.String())
+	if res == "" {
+		return "", fmt.Errorf("no text in google translate response")
+	}
+	return cleanBioText(res), nil
+}
+
+func translateSingleChunk(queryText string, sourceLang string, targetLang string) (string, error) {
+	if len(queryText) == 0 {
+		return "", nil
+	}
+	gTrans, errG := translateGoogle(queryText, targetLang)
+	if errG == nil && gTrans != "" && !isLikelyEnglish(gTrans) {
+		return gTrans, nil
 	}
 
 	if sourceLang == "" || sourceLang == "auto" {
 		sourceLang = "AUTODETECT"
 	}
-
 	langpair := fmt.Sprintf("%s|%s", sourceLang, targetLang)
 	endpoint := fmt.Sprintf("https://api.mymemory.translated.net/get?q=%s&langpair=%s",
 		url.QueryEscape(queryText), langpair)
@@ -398,22 +498,82 @@ func translateText(text string, sourceLang string, targetLang string) (string, e
 
 	resp, err := host.HTTPSend(req)
 	if err != nil {
-		return text, err
+		return queryText, err
 	}
 	if resp.StatusCode != 200 {
-		return text, fmt.Errorf("mymemory returned status %d", resp.StatusCode)
+		return queryText, fmt.Errorf("mymemory returned status %d", resp.StatusCode)
 	}
 
 	var data myMemoryResponse
 	if err := json.Unmarshal(resp.Body, &data); err != nil {
-		return text, err
+		return queryText, err
 	}
 
 	translated := data.ResponseData.TranslatedText
 	if translated != "" {
 		return cleanBioText(translated), nil
 	}
+	return queryText, nil
+}
 
+func translateText(text string, sourceLang string, targetLang string) (string, error) {
+	if len(text) == 0 {
+		return text, nil
+	}
+	// Try full text with Google Translate first (handles up to 4000 chars cleanly)
+	if len(text) <= 4000 {
+		gTrans, errG := translateGoogle(text, targetLang)
+		if errG == nil && isValidBio(gTrans) && !isLikelyEnglish(gTrans) {
+			return gTrans, nil
+		}
+	}
+
+	if len(text) <= 450 {
+		return translateSingleChunk(text, sourceLang, targetLang)
+	}
+
+	// Split by sentences or paragraphs so chunks are <= 450 characters
+	var paragraphs []string
+	if strings.Contains(text, "\n") {
+		paragraphs = strings.Split(text, "\n")
+	} else {
+		rawSentences := strings.Split(text, ". ")
+		var cur strings.Builder
+		for _, s := range rawSentences {
+			if cur.Len()+len(s)+2 > 400 && cur.Len() > 0 {
+				paragraphs = append(paragraphs, strings.TrimSpace(cur.String()))
+				cur.Reset()
+			}
+			if cur.Len() > 0 {
+				cur.WriteString(". ")
+			}
+			cur.WriteString(s)
+		}
+		if cur.Len() > 0 {
+			paragraphs = append(paragraphs, strings.TrimSpace(cur.String()))
+		}
+	}
+
+	var translatedChunks []string
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if len(p) == 0 {
+			continue
+		}
+		if len(p) > 450 {
+			p = p[:450]
+		}
+		trans, err := translateSingleChunk(p, sourceLang, targetLang)
+		if err == nil && trans != "" {
+			translatedChunks = append(translatedChunks, trans)
+		} else {
+			translatedChunks = append(translatedChunks, p)
+		}
+	}
+
+	if len(translatedChunks) > 0 {
+		return strings.Join(translatedChunks, "\n\n"), nil
+	}
 	return text, nil
 }
 
@@ -453,9 +613,20 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 			for _, lang := range targetLangs {
 				bio, err := fetchLastFmBio(req.Name, lang)
 				if err == nil && isValidBio(bio) {
-					pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Last.fm] Found native bio for %s (lang=%s)", req.Name, lang))
-					resultBio = bio
-					break
+					if primaryLang == "es" && isLikelyEnglish(bio) {
+						pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Last.fm] Bio for %s is in English despite requesting %s, translating to %s", req.Name, lang, primaryLang))
+						if isAutoTranslateEnabled() {
+							translated, errTrans := translateText(bio, "en", primaryLang)
+							if errTrans == nil && isValidBio(translated) {
+								resultBio = translated
+								break
+							}
+						}
+					} else {
+						pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Last.fm] Found native bio for %s (lang=%s)", req.Name, lang))
+						resultBio = bio
+						break
+					}
 				}
 			}
 			if resultBio == "" && isAutoTranslateEnabled() {
@@ -473,7 +644,7 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 			geniusBio, errGenius := fetchGeniusBio(req.Name)
 			if errGenius == nil && isValidBio(geniusBio) {
 				pdk.Log(pdk.LogInfo, fmt.Sprintf("[Source: Genius] Found description for %s", req.Name))
-				if isAutoTranslateEnabled() {
+				if isAutoTranslateEnabled() && (primaryLang == "es" && isLikelyEnglish(geniusBio)) {
 					translated, errTrans := translateText(geniusBio, "en", primaryLang)
 					if errTrans == nil && isValidBio(translated) {
 						resultBio = translated
@@ -488,6 +659,13 @@ func (p *ndMetadataPlugin) GetArtistBiography(req metadata.ArtistRequest) (*meta
 	}
 
 	if resultBio != "" {
+		if primaryLang == "es" && isLikelyEnglish(resultBio) && isAutoTranslateEnabled() {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Final biography for %s is still in English, translating to %s", req.Name, primaryLang))
+			translated, errTrans := translateText(resultBio, "en", primaryLang)
+			if errTrans == nil && isValidBio(translated) {
+				resultBio = translated
+			}
+		}
 		return &metadata.ArtistBiographyResponse{Biography: resultBio}, nil
 	}
 
@@ -558,6 +736,186 @@ func fetchLastFmAlbumDesc(artist, album string, lang string) (string, error) {
 	}
 
 	return cleaned, nil
+}
+
+type deezerArtistSearchResponse struct {
+	Data []struct {
+		ID            int64  `json:"id"`
+		Name          string `json:"name"`
+		PictureSmall  string `json:"picture_small"`
+		PictureMedium string `json:"picture_medium"`
+		PictureBig    string `json:"picture_big"`
+		PictureXL     string `json:"picture_xl"`
+	} `json:"data"`
+}
+
+func fetchDeezerImages(artistName string) ([]metadata.ImageInfo, error) {
+	cleanName := strings.TrimSpace(artistName)
+	if cleanName == "" {
+		return nil, fmt.Errorf("empty artist name")
+	}
+
+	endpoint := fmt.Sprintf("https://api.deezer.com/search/artist?q=%s&limit=3", url.QueryEscape(cleanName))
+	req := host.HTTPRequest{
+		Method: "GET",
+		URL:    endpoint,
+		Headers: map[string]string{
+			"User-Agent": "Navidrome/1.0",
+		},
+		TimeoutMs: 6000,
+	}
+
+	resp, err := host.HTTPSend(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("deezer returned status %d", resp.StatusCode)
+	}
+
+	var data deezerArtistSearchResponse
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return nil, err
+	}
+
+	normTarget := strings.ToLower(strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, cleanName))
+
+	for _, item := range data.Data {
+		candNorm := strings.ToLower(strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				return r
+			}
+			return -1
+		}, item.Name))
+
+		if normTarget == candNorm || strings.Contains(normTarget, candNorm) || strings.Contains(candNorm, normTarget) {
+			var images []metadata.ImageInfo
+			if item.PictureXL != "" {
+				images = append(images, metadata.ImageInfo{URL: item.PictureXL, Size: 1000})
+			}
+			if item.PictureBig != "" {
+				images = append(images, metadata.ImageInfo{URL: item.PictureBig, Size: 500})
+			}
+			if item.PictureMedium != "" {
+				images = append(images, metadata.ImageInfo{URL: item.PictureMedium, Size: 250})
+			}
+			if item.PictureSmall != "" {
+				images = append(images, metadata.ImageInfo{URL: item.PictureSmall, Size: 120})
+			}
+			if len(images) > 0 {
+				return images, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no matching Deezer image found for %s", cleanName)
+}
+
+func (p *ndMetadataPlugin) GetArtistImages(req metadata.ArtistRequest) (*metadata.ArtistImagesResponse, error) {
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Fetching artist images for: %s", req.Name))
+	imgs, err := fetchDeezerImages(req.Name)
+	if err == nil && len(imgs) > 0 {
+		return &metadata.ArtistImagesResponse{Images: imgs}, nil
+	}
+	return nil, fmt.Errorf("no images found for artist %s: %v", req.Name, err)
+}
+
+// Scrobbler Capability Implementation
+
+func (p *ndMetadataPlugin) IsAuthorized(req scrobbler.IsAuthorizedRequest) (bool, error) {
+	return true, nil
+}
+
+func (p *ndMetadataPlugin) NowPlaying(req scrobbler.NowPlayingRequest) error {
+	return p.handlePlayback(req.Track.Artist, req.Track.Artists)
+}
+
+func (p *ndMetadataPlugin) Scrobble(req scrobbler.ScrobbleRequest) error {
+	return p.handlePlayback(req.Track.Artist, req.Track.Artists)
+}
+
+func (p *ndMetadataPlugin) PlaybackReport(req scrobbler.PlaybackReportRequest) error {
+	return nil
+}
+
+func (p *ndMetadataPlugin) handlePlayback(artistName string, artists []types.ArtistRef) error {
+	if !isPlaybackRefreshEnabled() {
+		return nil
+	}
+	intervalDays := getRefreshIntervalDays()
+	if intervalDays <= 0 {
+		intervalDays = 7
+	}
+	syncURL := getSyncServiceURL()
+
+	var targetArtists []types.ArtistRef
+	if len(artists) > 0 {
+		targetArtists = artists
+	} else if strings.TrimSpace(artistName) != "" {
+		targetArtists = append(targetArtists, types.ArtistRef{Name: strings.TrimSpace(artistName)})
+	}
+
+	now := time.Now().Unix()
+
+	for _, a := range targetArtists {
+		name := strings.TrimSpace(a.Name)
+		if name == "" {
+			continue
+		}
+		kvKey := "last_refresh:" + strings.ToLower(name)
+		valBytes, exists, errKV := host.KVStoreGet(kvKey)
+		if errKV == nil && exists && len(valBytes) > 0 {
+			lastTs, errParse := strconv.ParseInt(string(valBytes), 10, 64)
+			if errParse == nil && (now-lastTs < intervalDays*86400) {
+				daysAgo := float64(now-lastTs) / 86400.0
+				pdk.Log(pdk.LogDebug, fmt.Sprintf("[Playback Refresh] Artist '%s' updated %.1f days ago (threshold: %d days). Skipping.", name, daysAgo, intervalDays))
+				continue
+			}
+		}
+
+		pdk.Log(pdk.LogInfo, fmt.Sprintf("[Playback Refresh] Checking/updating metadata for artist '%s' (threshold: %d days)", name, intervalDays))
+
+		payload := map[string]interface{}{
+			"artist_id":     a.ID,
+			"artist_name":   name,
+			"interval_days": intervalDays,
+		}
+		payloadBytes, errMarshal := json.Marshal(payload)
+		if errMarshal != nil {
+			continue
+		}
+
+		httpReq := host.HTTPRequest{
+			Method: "POST",
+			URL:    syncURL,
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+				"User-Agent":   "Navidrome-Metadata/1.5",
+			},
+			Body:      payloadBytes,
+			TimeoutMs: 15000,
+		}
+
+		resp, errHTTP := host.HTTPSend(httpReq)
+		if errHTTP != nil {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("[Playback Refresh] Error calling sync service at %s for '%s': %v", syncURL, name, errHTTP))
+			continue
+		}
+
+		if resp.StatusCode == 200 {
+			_ = host.KVStoreSet(kvKey, []byte(strconv.FormatInt(now, 10)))
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("[Playback Refresh] Sync success for '%s': %s", name, string(resp.Body)))
+		} else {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("[Playback Refresh] Sync service returned status %d for '%s'", resp.StatusCode, name))
+		}
+	}
+
+	return nil
 }
 
 func main() {}

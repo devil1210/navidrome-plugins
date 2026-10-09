@@ -119,6 +119,29 @@ class NavidromeClient:
             logger.warning("Error searching Navidrome albums for '%s': %s", query, e)
             return []
 
+    def get_album_list(self, type_: str = "alphabeticalByName", size: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
+        """Fetches list of albums from Navidrome using Subsonic getAlbumList2.view."""
+        url = f"{self.base_url}/rest/getAlbumList2.view"
+        params = self._get_auth_params()
+        params["type"] = type_
+        params["size"] = str(size)
+        params["offset"] = str(offset)
+
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            subsonic_resp = data.get("subsonic-response", {})
+            album_list = subsonic_resp.get("albumList2", {}).get("album", [])
+            if not album_list:
+                album_list = subsonic_resp.get("albumList", {}).get("album", [])
+            if isinstance(album_list, dict):
+                return [album_list]
+            return album_list or []
+        except Exception as e:
+            logger.warning("Error fetching album list from Navidrome: %s", e)
+            return []
+
     def get_album(self, album_id: str) -> Optional[Dict[str, Any]]:
         """Fetches full album details including track list from Navidrome."""
         url = f"{self.base_url}/rest/getAlbum.view"
@@ -146,34 +169,112 @@ class NavidromeClient:
             return songs
         return []
 
-    def find_album_match(self, album_name: str, artist_name: str = "") -> Optional[Dict[str, Any]]:
+    def get_song(self, song_id: str) -> Optional[Dict[str, Any]]:
+        """Fetches metadata for a single song from Navidrome."""
+        url = f"{self.base_url}/rest/getSong.view"
+        params = self._get_auth_params()
+        params["id"] = song_id
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("subsonic-response", {}).get("song")
+        except Exception as e:
+            logger.warning("Error fetching song '%s' from Navidrome: %s", song_id, e)
+            return None
+
+    def find_album_match(self, album_name: str, artist_name: str = "", strict_artist: bool = False) -> Optional[Dict[str, Any]]:
         """
         Checks whether an album already exists in the local Navidrome library.
         Normalizes titles, strips single/edition tags, and handles flexible/token artist matching.
         """
+        matches = self.find_all_album_matches(album_name, artist_name, strict_artist=strict_artist)
+        return matches[0] if matches else None
+
+    def find_all_album_matches(
+        self,
+        album_name: str,
+        artist_name: str = "",
+        strict_artist: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Finds all matching albums in the local Navidrome library for a given album and artist name.
+        Normalizes titles, strips single/edition tags, and handles flexible/token artist matching.
+        Searches using multiple strategies (clean title, full title, artist name, combined query)
+        so short names (like 'x' or '=') or edition-suffixed names are properly found.
+        Returns a list of matching album candidate dictionaries sorted with highest songCount first.
+        """
         def norm(s: str) -> str:
             return re.sub(r"[^\w\s]", "", (s or "").lower()).strip()
 
-        clean_album = re.sub(r"\s*[\(\[].*?[\)\]]", "", album_name).strip()
-        norm_target_album = norm(clean_album)
-        if not norm_target_album:
-            return None
+        def strip_editions(s: str) -> str:
+            clean = re.sub(r"\s*[\(\[].*?[\)\]]", "", s or "").strip()
+            clean = re.sub(r"\s*-\s*(deluxe|expanded|anniversary|remastered|bonus track|edition|version).*", "", clean, flags=re.I).strip()
+            return clean
 
-        candidates = self.search_albums(clean_album, count=10)
-        if not candidates:
-            return None
+        clean_album = strip_editions(album_name)
+        norm_target_album = norm(clean_album)
+        norm_full_album = norm(album_name)
+        if not norm_target_album and not norm_full_album and not clean_album:
+            return []
 
         norm_target_artist = norm(artist_name)
 
-        for cand in candidates:
-            cand_name = cand.get("name", "")
-            clean_cand = re.sub(r"\s*[\(\[].*?[\)\]]", "", cand_name).strip()
-            norm_cand_name = norm(clean_cand)
+        # Collect raw candidates with multi-query strategy
+        raw_candidates: List[Dict[str, Any]] = []
+        seen_ids = set()
 
-            name_match = (
-                norm_cand_name == norm_target_album
-                or (len(norm_target_album) >= 4 and (norm_target_album in norm_cand_name or norm_cand_name in norm_target_album))
-            )
+        queries_to_try = []
+        if len(clean_album) >= 2:
+            queries_to_try.append(clean_album)
+        if album_name and album_name != clean_album:
+            queries_to_try.append(album_name)
+        if artist_name:
+            queries_to_try.append(artist_name)
+            if len(clean_album) >= 2:
+                queries_to_try.append(f"{artist_name} {clean_album}")
+
+        for q in queries_to_try:
+            try:
+                cands = self.search_albums(q, count=25)
+                for c in cands:
+                    cid = c.get("id")
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        raw_candidates.append(c)
+                    elif not cid and c not in raw_candidates:
+                        raw_candidates.append(c)
+            except Exception as e:
+                logger.debug("Error searching albums for '%s': %s", q, e)
+
+        if not raw_candidates:
+            return []
+
+        matched_candidates: List[Dict[str, Any]] = []
+
+        for cand in raw_candidates:
+            cand_name = cand.get("name", "")
+            clean_cand = strip_editions(cand_name)
+            norm_cand_name = norm(clean_cand)
+            norm_cand_full = norm(cand_name)
+
+            if not norm_cand_name and not norm_cand_full:
+                raw_target_core = clean_album.strip()
+                raw_cand_core = clean_cand.strip()
+                name_match = (raw_target_core == raw_cand_core) if raw_target_core else False
+            else:
+                name_match = False
+                # 1. Exact core title match (e.g. "x" == "x", "ensemble play" == "ensemble play")
+                if norm_target_album and norm_cand_name and norm_cand_name == norm_target_album:
+                    name_match = True
+                # 2. Exact full title match (e.g. "x deluxe edition" == "x deluxe edition")
+                elif norm_full_album and norm_cand_full and norm_cand_full == norm_full_album:
+                    name_match = True
+                # 3. Substring matching ONLY if both core titles are at least 4 chars long
+                elif len(norm_target_album) >= 4 and len(norm_cand_name) >= 4:
+                    if norm_target_album in norm_cand_name or norm_cand_name in norm_target_album:
+                        name_match = True
+
             if not name_match:
                 continue
 
@@ -202,16 +303,17 @@ class NavidromeClient:
                 if not matched_artist and norm_target_artist in norm(cand_name):
                     matched_artist = True
 
-                # If only 1 candidate found with exact album title, accept it
-                if not matched_artist and len(candidates) == 1 and norm_cand_name == norm_target_album:
+                # If only 1 candidate found with exact album title, accept it (only if not strict_artist)
+                if not strict_artist and not matched_artist and len(raw_candidates) == 1 and norm_cand_name == norm_target_album:
                     matched_artist = True
 
                 if not matched_artist:
                     continue
 
-            return cand
+            matched_candidates.append(cand)
 
-        return None
+        matched_candidates.sort(key=lambda c: int(c.get("songCount", 0) or 0), reverse=True)
+        return matched_candidates
 
     def find_best_match(
         self,
@@ -219,6 +321,7 @@ class NavidromeClient:
         target_artist: str = "",
         target_album: Optional[str] = None,
         target_duration_ms: Optional[int] = None,
+        strict_artist: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Looks up whether a track already exists in Navidrome using intelligent scoring:
@@ -405,7 +508,8 @@ class NavidromeClient:
                             break
 
                 # If candidate has exact title match and target title is distinct (>= 5 chars or >= 2 words)
-                if not matched_artist and (norm_cand_title == norm_target_title or norm_cand_title == norm(rom_title)):
+                # Only allowed as fallback when strict_artist is False
+                if not strict_artist and not matched_artist and (norm_cand_title == norm_target_title or norm_cand_title == norm(rom_title)):
                     if len(norm_target_title) >= 5 or len(norm_target_title.split()) >= 2:
                         matched_artist = True
                         artist_score = 75.0

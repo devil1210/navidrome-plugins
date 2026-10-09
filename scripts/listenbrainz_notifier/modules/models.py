@@ -77,6 +77,8 @@ class DownloadJob:
     albums: List[ResolvedAlbum] = field(default_factory=list)
     tracks: List[ResolvedTrack] = field(default_factory=list)
     source_desc: str = ""
+    status_msg_id: Optional[int] = None
+
 
 
 @dataclass

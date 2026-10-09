@@ -27,6 +27,7 @@ from .enricher import ListenBrainzEnricher
 from .models import MissingTrack, ResolutionResult, ResolvedAlbum, ResolvedTrack
 from .navidrome import NavidromeClient
 from .parser import TrackParser
+from .playlist_aligner import reorder_playlist_if_needed
 from .resolver import YouTubeMusicResolver
 from .state import StateTracker
 from .telegram import TelegramSender
@@ -78,6 +79,13 @@ def titles_match(t1: str, t2: str) -> bool:
         return True
     if len(c1) >= 5 and len(c2) >= 5 and (c1[:5] in c2 or c2[:5] in c1):
         return True
+    # Romaji substring matching (e.g. のびしろ -> nobishiro vs Nobishiro - from the FIRST TAKE)
+    cr1 = r1.replace(" ", "")
+    cr2 = r2.replace(" ", "")
+    if len(cr1) >= 4 and len(cr2) >= 4 and (cr1 in cr2 or cr2 in cr1):
+        return True
+    if len(cr1) >= 5 and len(cr2) >= 5 and (cr1[:5] in cr2 or cr2[:5] in c1):
+        return True
     return False
 
 
@@ -93,8 +101,29 @@ def process_playlist_text(
     batch_number: int = 1,
     batch_size: int = 20,
     state_tracker: Optional[StateTracker] = None,
+    injected_accumulator: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    reorder_accumulator: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Processes raw text or comment string and dispatches notification."""
+    injected_tracks: List[Dict[str, Any]] = []
+
+    def _persist_injected():
+        nonlocal injected_tracks
+        if not injected_tracks:
+            return
+        seen_keys = set()
+        uniq = []
+        for itm in injected_tracks:
+            k = (itm.get("id"), itm.get("requested"))
+            if k not in seen_keys:
+                seen_keys.add(k)
+                uniq.append(itm)
+        injected_tracks = uniq
+        if state_tracker and injected_tracks:
+            state_tracker.save_last_injected(playlist_name, injected_tracks)
+        if injected_accumulator is not None and injected_tracks:
+            injected_accumulator[playlist_name] = injected_tracks
+
     missing_text = TrackParser.extract_missing_text(raw_text)
     if not missing_text:
         # If no header, treat raw_text as list
@@ -140,11 +169,11 @@ def process_playlist_text(
         matched_locally: List[Tuple[MissingTrack, Dict[str, Any]]] = []
 
         if len(tracks) <= 2:
-            match_results = [(t, navidrome.find_best_match(t.title, t.artist)) for t in tracks]
+            match_results = [(t, navidrome.find_best_match(t.title, t.artist or "", strict_artist=bool(t.artist))) for t in tracks]
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-                futures = [executor.submit(navidrome.find_best_match, t.title, t.artist) for t in tracks]
-                match_results = [(t, f.result()) for t, f in zip(tracks, futures)]
+                futures = [executor.submit(navidrome.find_best_match, t.title, t.artist or "", strict_artist=bool(t.artist)) for t in tracks]
+                match_results = [(t, f.result() if f else None) for t, f in zip(tracks, futures)]
 
         for t, best_cand in match_results:
             if best_cand and best_cand.get("id"):
@@ -170,20 +199,65 @@ def process_playlist_text(
                     s.get("album"),
                 )
                 resolved_and_discarded_titles.add(t.title)
+                injected_tracks.append({
+                    "requested": t.title,
+                    "requested_artist": t.artist or "",
+                    "artist": s.get("artist") or s.get("displayArtist") or t.artist or "",
+                    "title": s.get("title", ""),
+                    "album": s.get("album", ""),
+                    "id": s.get("id", ""),
+                    "layer": "pre_check",
+                })
 
             if playlist_id and not dry_run:
-                song_ids = list(dict.fromkeys([s["id"] for _, s in matched_locally]))
-                logger.info("Auto-injecting %d unique song(s) into Navidrome playlist '%s' (ID: %s)...", len(song_ids), playlist_name, playlist_id)
-                navidrome.add_tracks_to_playlist(playlist_id, song_ids)
+                new_songs = [s for _, s in matched_locally if isinstance(s, dict) and s.get("id")]
+                logger.info("Aligning and auto-injecting %d song(s) into Navidrome playlist '%s' (ID: %s)...", len(new_songs), playlist_name, playlist_id)
+                res = reorder_playlist_if_needed(
+                    navidrome=navidrome,
+                    playlist_id=playlist_id,
+                    comment=raw_text,
+                    new_songs=new_songs,
+                )
+                if reorder_accumulator is not None and res:
+                    reorder_accumulator[playlist_name] = {
+                        "was_reordered": res.was_reordered,
+                        "track_count": res.track_count,
+                        "official_count": res.official_count,
+                        "message": res.message,
+                    }
 
         tracks = truly_missing
 
     if not tracks:
-        if navidrome and playlist_id and not dry_run and resolved_and_discarded_titles:
-            new_comment = TrackParser.rebuild_comment_without_tracks(raw_text, resolved_and_discarded_titles)
-            if new_comment != raw_text:
-                navidrome.update_playlist_comment(playlist_id, new_comment)
-                logger.info("Updated comment for playlist '%s'.", playlist_name)
+        _persist_injected()
+        if navidrome and playlist_id and not dry_run:
+            # Enforce official order even if no new tracks were downloaded/missing
+            res = reorder_playlist_if_needed(
+                navidrome=navidrome,
+                playlist_id=playlist_id,
+                comment=raw_text,
+            )
+            if reorder_accumulator is not None and res:
+                reorder_accumulator[playlist_name] = {
+                    "was_reordered": res.was_reordered,
+                    "track_count": res.track_count,
+                    "official_count": res.official_count,
+                    "message": res.message,
+                }
+            if resolved_and_discarded_titles:
+                new_comment = TrackParser.rebuild_comment_without_tracks(raw_text, resolved_and_discarded_titles)
+                if new_comment != raw_text:
+                    navidrome.update_playlist_comment(playlist_id, new_comment)
+                    logger.info("Updated comment for playlist '%s'.", playlist_name)
+        if state_tracker:
+            state_tracker.save_last_batch(
+                playlist_name=playlist_name,
+                batch_number=batch_number,
+                batch_size=batch_size,
+                total_batches=1,
+                albums=[],
+                tracks=[],
+            )
         logger.info(
             "All tracks for '%s' are already present in the local library! Nothing to download from YouTube Music.",
             playlist_name,
@@ -206,68 +280,126 @@ def process_playlist_text(
         post_matched_song_ids: List[str] = []
         filtered_albums: List[ResolvedAlbum] = []
         for alb in full_result.albums:
-            existing = navidrome.find_album_match(alb.album_name, alb.artist_name)
-            if existing:
-                nav_tracks = navidrome.get_album_tracks(existing.get("id", ""))
-                all_present = True
-                matched_ids_for_alb = []
-                for t_idx, t_name in enumerate(alb.tracks):
-                    matched_s = None
-                    # Try matching with original parsed track name
-                    for nt in nav_tracks:
-                        if titles_match(t_name, nt.get("title", "")):
-                            matched_s = nt
-                            break
-                    # If not matched, try matching with the resolved YouTube Music song title
-                    if not matched_s and getattr(alb, "resolved_tracks", []):
-                        res_track = alb.resolved_tracks[t_idx] if t_idx < len(alb.resolved_tracks) else None
-                        if res_track:
-                            for nt in nav_tracks:
-                                if titles_match(res_track, nt.get("title", "")):
-                                    matched_s = nt
-                                    break
-                    if not matched_s and getattr(alb, "resolved_tracks", []):
-                        for res_track in alb.resolved_tracks:
-                            for nt in nav_tracks:
-                                if titles_match(res_track, nt.get("title", "")):
-                                    matched_s = nt
-                                    break
-                            if matched_s:
+            # 1. Look up all matching albums in Navidrome (pools tracks across matching candidates)
+            all_matches = []
+            if hasattr(navidrome, "find_all_album_matches"):
+                try:
+                    res = navidrome.find_all_album_matches(alb.album_name, alb.artist_name)
+                    if isinstance(res, list):
+                        all_matches = [m for m in res if isinstance(m, dict)]
+                except Exception:
+                    pass
+            if not all_matches and hasattr(navidrome, "find_album_match"):
+                try:
+                    single = navidrome.find_album_match(alb.album_name, alb.artist_name)
+                    if single and isinstance(single, dict):
+                        all_matches = [single]
+                except Exception:
+                    pass
+
+            nav_tracks = []
+            for em in all_matches:
+                t_list = navidrome.get_album_tracks(em.get("id", ""))
+                if isinstance(t_list, list):
+                    nav_tracks.extend(t_list)
+
+            all_present = True
+            matched_ids_for_alb = []
+            alb_matched_records = []
+            for t_idx, t_name in enumerate(alb.tracks):
+                matched_s = None
+                # Try matching with original parsed track name within matching albums
+                for nt in nav_tracks:
+                    if titles_match(t_name, nt.get("title", "")):
+                        matched_s = nt
+                        break
+                # If not matched, try matching with the resolved YouTube Music song title
+                if not matched_s and getattr(alb, "resolved_tracks", []):
+                    res_track = alb.resolved_tracks[t_idx] if t_idx < len(alb.resolved_tracks) else None
+                    if res_track:
+                        for nt in nav_tracks:
+                            if titles_match(res_track, nt.get("title", "")):
+                                matched_s = nt
                                 break
+                if not matched_s and getattr(alb, "resolved_tracks", []):
+                    for res_track in alb.resolved_tracks:
+                        for nt in nav_tracks:
+                            if titles_match(res_track, nt.get("title", "")):
+                                matched_s = nt
+                                break
+                        if matched_s:
+                            break
 
-                    if matched_s:
-                        if matched_s.get("id"):
-                            matched_ids_for_alb.append(matched_s["id"])
-                    else:
-                        all_present = False
+                # Fallback: check if the track exists in Navidrome under another release/compilation/single
+                if not matched_s:
+                    trk_match = navidrome.find_best_match(t_name, alb.artist_name, strict_artist=True)
+                    if trk_match and trk_match.get("id"):
+                        matched_s = trk_match
 
-                if all_present and alb.tracks:
-                    logger.info("El álbum '%s' de '%s' ya tiene todas sus pistas requeridas en Navidrome. Omitiendo de pendientes.", alb.album_name, alb.artist_name)
-                    post_matched_song_ids.extend(matched_ids_for_alb)
-                    for t in alb.tracks:
-                        resolved_and_discarded_titles.add(t)
-                    continue
+                if matched_s:
+                    if matched_s.get("id"):
+                        matched_ids_for_alb.append(matched_s["id"])
+                        alb_matched_records.append({
+                            "requested": t_name,
+                            "requested_artist": alb.artist_name,
+                            "artist": matched_s.get("artist") or matched_s.get("displayArtist") or alb.artist_name,
+                            "title": matched_s.get("title", ""),
+                            "album": matched_s.get("album") or alb.album_name,
+                            "id": matched_s["id"],
+                            "layer": "post_resolution_album",
+                        })
                 else:
-                    alb.is_partial = True
-                    alb.nav_present_tracks = len(matched_ids_for_alb)
-                    alb.nav_total_tracks = len(nav_tracks)
+                    all_present = False
+
+            if all_present and alb.tracks:
+                logger.info("El álbum '%s' de '%s' ya tiene todas sus pistas requeridas en Navidrome. Omitiendo de pendientes.", alb.album_name, alb.artist_name)
+                post_matched_song_ids.extend(matched_ids_for_alb)
+                injected_tracks.extend(alb_matched_records)
+                for t in alb.tracks:
+                    resolved_and_discarded_titles.add(t)
+                continue
+            elif matched_ids_for_alb:
+                alb.is_partial = True
+                alb.nav_present_tracks = len(matched_ids_for_alb)
+                alb.nav_total_tracks = len(nav_tracks) if nav_tracks else len(alb.tracks)
 
             filtered_albums.append(alb)
 
         filtered_tracks: List[ResolvedTrack] = []
         for trk in full_result.tracks:
-            m = navidrome.find_best_match(trk.title, trk.artist)
+            m = navidrome.find_best_match(trk.title, trk.artist, strict_artist=True)
             if m and m.get("id"):
                 logger.info("La pista suelta '%s' de '%s' ya existe en Navidrome (ID: %s). Omitiendo de pendientes.", trk.title, trk.artist, m.get("id"))
                 post_matched_song_ids.append(m["id"])
                 resolved_and_discarded_titles.add(trk.title)
+                injected_tracks.append({
+                    "requested": trk.title,
+                    "requested_artist": trk.artist,
+                    "artist": m.get("artist") or m.get("displayArtist") or trk.artist,
+                    "title": m.get("title", ""),
+                    "album": m.get("album", ""),
+                    "id": m["id"],
+                    "layer": "post_resolution_single",
+                })
                 continue
             filtered_tracks.append(trk)
 
         if post_matched_song_ids and playlist_id and not dry_run:
             uniq_ids = list(dict.fromkeys(post_matched_song_ids))
-            logger.info("Auto-inyectando %d canción(es) detectadas tras resolución en la playlist '%s'...", len(uniq_ids), playlist_name)
-            navidrome.add_tracks_to_playlist(playlist_id, uniq_ids)
+            logger.info("Aligning and auto-injecting %d song(s) detected post-resolution in playlist '%s'...", len(uniq_ids), playlist_name)
+            res = reorder_playlist_if_needed(
+                navidrome=navidrome,
+                playlist_id=playlist_id,
+                comment=raw_text,
+                new_song_ids=uniq_ids,
+            )
+            if reorder_accumulator is not None and res:
+                reorder_accumulator[playlist_name] = {
+                    "was_reordered": res.was_reordered,
+                    "track_count": res.track_count,
+                    "official_count": res.official_count,
+                    "message": res.message,
+                }
 
         full_result.albums = filtered_albums
         full_result.tracks = filtered_tracks
@@ -308,6 +440,16 @@ def process_playlist_text(
             raw_text = new_comment
 
     if not full_result.albums and not full_result.tracks:
+        _persist_injected()
+        if state_tracker:
+            state_tracker.save_last_batch(
+                playlist_name=playlist_name,
+                batch_number=batch_number,
+                batch_size=batch_size,
+                total_batches=1,
+                albums=[],
+                tracks=[],
+            )
         logger.info(
             "Todas las pistas y álbumes para '%s' ya están presentes en la biblioteca local tras resolución. Nada pendiente por descargar.",
             playlist_name,
@@ -351,6 +493,8 @@ def process_playlist_text(
             tracks=[{"url": t.url, "title": t.title, "artist": t.artist} for t in sliced_tracks],
         )
 
+    _persist_injected()
+
     if dry_run or not telegram:
         batch_info = f" (Lote {result.batch_number}/{result.total_batches})" if result.total_batches > 1 else ""
         print("\n" + "=" * 60)
@@ -372,7 +516,7 @@ def process_playlist_text(
 
 def run_sync(
     navidrome: NavidromeClient,
-    telegram: TelegramSender,
+    telegram: Optional[TelegramSender],
     state_tracker: StateTracker,
     target_names: Set[str],
     fallback_to_track: bool,
@@ -381,6 +525,8 @@ def run_sync(
     enricher: Optional[ListenBrainzEnricher] = None,
     batch_number: int = 1,
     batch_size: int = 20,
+    injected_accumulator: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    reorder_accumulator: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, int]:
     """
     Checks Navidrome for updated ListenBrainz playlists and processes them.
@@ -417,6 +563,19 @@ def run_sync(
                 has_matched_comment = ("Tracks not matched" in comment) or ("Tracks not found in library" in comment)
 
         if not has_matched_comment:
+            # Even if there are no missing tracks in comment, check if the playlist needs reordering!
+            # Especially when user runs /sync manually (force=True)
+            if not dry_run and comment and "listenbrainz.org/playlist/" in comment:
+                res = reorder_playlist_if_needed(navidrome, pls_id, comment)
+                if res and reorder_accumulator is not None:
+                    reorder_accumulator[pls_name] = {
+                        "was_reordered": res.was_reordered,
+                        "track_count": res.track_count,
+                        "official_count": res.official_count,
+                        "message": res.message,
+                    }
+                    if res.was_reordered:
+                        processed_count += 1
             continue
 
         logger.info("Found relevant playlist: '%s' (ID: %s)", pls_name, pls_id)
@@ -437,6 +596,8 @@ def run_sync(
             batch_number=batch_number,
             batch_size=batch_size,
             state_tracker=state_tracker,
+            injected_accumulator=injected_accumulator,
+            reorder_accumulator=reorder_accumulator,
         )
 
         if success and not dry_run:

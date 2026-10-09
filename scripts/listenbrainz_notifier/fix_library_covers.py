@@ -53,19 +53,24 @@ def fetch_itunes_cover(artist: str, album: str) -> Optional[Image.Image]:
     search_queries = [
         f"{clean_artist} {clean_album}",
         f"{artist} {clean_album}",
-        clean_album,
     ]
 
+    norm_target = clean_artist.lower()
     for term in search_queries:
         if not term.strip():
             continue
-        url = f"https://itunes.apple.com/search?term={urllib.parse.quote(term.strip())}&entity=album&limit=3"
+        url = f"https://itunes.apple.com/search?term={urllib.parse.quote(term.strip())}&entity=album&limit=5"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             results = data.get("results", [])
             for r in results:
+                cand_artist = r.get("artistName", "").lower()
+                if norm_target not in cand_artist and cand_artist not in norm_target:
+                    artist_words = [w for w in re.split(r"\W+", norm_target) if len(w) >= 4]
+                    if not any(w in cand_artist for w in artist_words):
+                        continue
                 art = r.get("artworkUrl100")
                 if art:
                     art1200 = re.sub(r"\d+x\d+bb", "1200x1200bb", art)

@@ -14,18 +14,13 @@ import argparse
 import html
 import json
 import logging
-import math
 import os
-import re
-import shutil
 import sys
-import threading
-import time
-import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from dotenv import load_dotenv
+
 # Lazy load YTMusic for backward compatibility and test mock compatibility
 def __getattr__(name: str):
     if name == "YTMusic":
@@ -63,7 +58,7 @@ logger = logging.getLogger("listenbrainz_notifier")
 # Import modular components with fallback for script vs module execution
 try:
     from .modules.discoverer import YouTubeMusicDiscoverer
-    from .modules.downloader import DownloadQueue, MusicDownloader
+    from .modules.downloader import AlbumProgressStreamer, DownloadQueue, MusicDownloader
     from .modules.enricher import ListenBrainzEnricher
     from .modules.models import (
         DownloadJob,
@@ -75,10 +70,10 @@ try:
     )
     from .modules.navidrome import NavidromeClient
     from .modules.parser import TrackParser
+    from .modules.picard_engine import DEFAULT_PICARD_PLUGINS, PicardEngine
     from .modules.resolver import UniversalResolver, YouTubeMusicResolver, parse_sync_args
     from .modules.state import StateTracker
     from .modules.syncer import process_playlist_text, run_sync
-    from .modules.picard_engine import DEFAULT_PICARD_PLUGINS, PicardEngine
     from .modules.telegram import (
         TelegramBotListener,
         TelegramSender,
@@ -86,9 +81,19 @@ try:
         build_discography_menu,
         build_plugins_menu,
     )
+    from .handlers import (
+        DiscographyHandler,
+        DiscoveryHandler,
+        SyncHandler,
+        SystemHandler,
+        format_injected_feedback,
+        format_queue_note,
+        to_windows_path,
+    )
+    from .services import start_background_scheduler
 except ImportError:
     from modules.discoverer import YouTubeMusicDiscoverer
-    from modules.downloader import DownloadQueue, MusicDownloader
+    from modules.downloader import AlbumProgressStreamer, DownloadQueue, MusicDownloader
     from modules.enricher import ListenBrainzEnricher
     from modules.models import (
         DownloadJob,
@@ -111,6 +116,16 @@ except ImportError:
         build_discography_menu,
         build_plugins_menu,
     )
+    from handlers import (
+        DiscographyHandler,
+        DiscoveryHandler,
+        SyncHandler,
+        SystemHandler,
+        format_injected_feedback,
+        format_queue_note,
+        to_windows_path,
+    )
+    from services import start_background_scheduler
 
 __all__ = [
     "MissingTrack",
@@ -128,6 +143,7 @@ __all__ = [
     "NavidromeClient",
     "MusicDownloader",
     "DownloadQueue",
+    "AlbumProgressStreamer",
     "TelegramSender",
     "TelegramBotListener",
     "build_discography_menu",
@@ -139,12 +155,11 @@ __all__ = [
     "process_playlist_text",
     "run_sync",
     "YTMusic",
+    "format_injected_feedback",
+    "to_windows_path",
+    "format_queue_note",
 ]
 
-
-# ==============================================================================
-# CLI Entrypoint & Daemon Scheduler
-# ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
@@ -227,41 +242,22 @@ def main():
     tg_style = os.getenv("TELEGRAM_QUOTE_STYLE", "blockquote")
 
     raw_names = os.getenv("PLAYLIST_NAMES", "Daily Jams,daily-jams,Discover Weekly")
-    target_names = {name.strip() for name in raw_names.split(",") if name.strip()}
+    target_names_ordered = [name.strip() for name in raw_names.split(",") if name.strip()]
+    target_names = set(target_names_ordered)
 
     fallback_to_track = os.getenv("FALLBACK_TO_TRACK", "true").lower() in ("true", "1", "yes")
     daemon_interval = args.interval or int(os.getenv("DAEMON_INTERVAL_MINUTES", "30"))
     default_max_albums = args.limit if args.limit is not None else int(os.getenv("MAX_ALBUMS_PER_SYNC", "20"))
-
-    # Download configuration (M:\music\downloads -> /media/music/downloads)
-    def to_windows_path(linux_path: Union[str, Path]) -> str:
-        s = str(linux_path).replace("/", "\\")
-        if "\\media\\" in s:
-            idx = s.index("\\media\\")
-            return "M:" + s[idx + len("\\media"):]
-        if s.startswith("media\\"):
-            return "M:" + s[len("media"):]
-        return s
 
     download_music_dir = os.getenv("DOWNLOAD_MUSIC_DIR", "/var/tmp/music_downloads")
     library_music_dir = os.getenv("LIBRARY_MUSIC_DIR", "/media/music")
     download_uid = int(os.getenv("DOWNLOAD_UID", "1000"))
     download_gid = int(os.getenv("DOWNLOAD_GID", "1000"))
     ytdl_cookies_path = os.getenv("YTDL_COOKIES_PATH", None) or None
-    if not ytdl_cookies_path or not os.path.isfile(ytdl_cookies_path):
-        for candidate in [
-            script_dir / "cookies.txt",
-            Path("/media/downloads/cookies.txt"),
-            Path("/media/music/downloads/cookies.txt"),
-            Path(download_music_dir).parent / "cookies.txt",
-            Path(download_music_dir) / "cookies.txt",
-        ]:
-            if candidate.is_file():
-                ytdl_cookies_path = str(candidate)
-                logger.info("Auto-detected YouTube cookies file at: %s", ytdl_cookies_path)
-                break
+    if ytdl_cookies_path and any(k in Path(ytdl_cookies_path).name.lower() for k in ("discovery", "personal")):
+        logger.warning("YTDL_COOKIES_PATH contiene archivo de cuenta personal/descubrimiento (%s). Excluido de descargas por seguridad.", ytdl_cookies_path)
+        ytdl_cookies_path = None
 
-    # ListenBrainz metadata enrichment
     lbz_user = os.getenv("LISTENBRAINZ_USERNAME", "")
     lbz_token = os.getenv("LISTENBRAINZ_TOKEN", "")
     enricher = ListenBrainzEnricher(username=lbz_user, token=lbz_token)
@@ -273,7 +269,6 @@ def main():
         quote_style=tg_style,
     )
 
-    # Setup Navidrome and State Tracker
     navidrome = NavidromeClient(base_url=nav_url, user=nav_user, password=nav_pass)
     state_file = script_dir / ".state.json"
     state_tracker = StateTracker(state_file=state_file)
@@ -303,41 +298,53 @@ def main():
 
         logger.info("Starting ListenBrainz Bot service (background sync interval: %d min)...", daemon_interval)
 
-        found_cookies: List[str] = []
+        found_download_cookies: List[str] = []
+        if ytdl_cookies_path and os.path.isfile(ytdl_cookies_path):
+            found_download_cookies.append(str(Path(ytdl_cookies_path).resolve()))
+
         parent_dir = Path(download_music_dir).parent
         cookies_folder = parent_dir / "cookies"
         for d in [
             cookies_folder,
-            parent_dir,
-            Path(download_music_dir),
-            script_dir,
-            Path("/media/downloads"),
+            script_dir / "cookies",
+            Path(download_music_dir) / "cookies",
             Path("/media/downloads/cookies"),
             Path("/media/music/cookies"),
-            Path("/media/music/downloads"),
         ]:
             if d.is_dir():
-                for f in sorted(d.glob("cookie*.txt")):
-                    if f.is_file() and str(f) not in found_cookies:
-                        found_cookies.append(str(f))
                 for f in sorted(d.glob("*.txt")):
-                    if f.is_file() and "cookie" in f.name.lower() and str(f) not in found_cookies:
-                        found_cookies.append(str(f))
+                    if (
+                        f.is_file()
+                        and str(f) not in found_download_cookies
+                        and not any(k in f.name.lower() for k in ("discovery", "personal", "backup", "_bad"))
+                    ):
+                        found_download_cookies.append(str(f))
 
         downloader = MusicDownloader(
             download_dir=download_music_dir,
             library_dir=library_music_dir,
             uid=download_uid,
             gid=download_gid,
-            cookies_list=found_cookies,
+            cookies_list=found_download_cookies,
             state_tracker=state_tracker,
         )
         win_dest = to_windows_path(library_music_dir)
         universal_resolver = UniversalResolver()
 
-        active_cookie = ytdl_cookies_path or (found_cookies[0] if found_cookies else None)
+        # Dedicated discovery cookie (only for reading personal YouTube Music playlists/recommendations)
+        discovery_cookie = os.getenv("DISCOVERY_COOKIES_PATH", "").strip() or None
+        if not discovery_cookie or not os.path.isfile(discovery_cookie):
+            for cand in [
+                script_dir / "discovery_cookies.txt",
+                Path("/media/downloads/discovery_cookies.txt"),
+                parent_dir / "discovery_cookies.txt",
+            ]:
+                if cand.is_file():
+                    discovery_cookie = str(cand)
+                    break
+
         discoverer = YouTubeMusicDiscoverer(
-            cookie_file=active_cookie,
+            cookie_file=discovery_cookie,
             music_dir=library_music_dir,
         )
 
@@ -351,1166 +358,97 @@ def main():
             queue_file=str(script_dir / ".download_queue.json"),
         )
 
-        def on_download_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            current_limit = state_tracker.get_limit(default_limit=default_max_albums)
-            target_pls, batch_num, batch_size = parse_sync_args(raw_args, default_limit=current_limit)
-            is_all = (batch_size == 0)
-
-            target_pls_name = target_pls
-            last_batch = state_tracker.get_last_batch(target_pls)
-            if not target_pls_name and last_batch:
-                target_pls_name = last_batch.get("playlist_name")
-            if not target_pls_name:
-                target_pls_name = list(target_names)[0] if target_names else "Descubrimiento Diario"
-
-            albums_to_download: List[ResolvedAlbum] = []
-            tracks_to_download: List[ResolvedTrack] = []
-
-            # If cached batch matches requested batch
-            if last_batch and not is_all and last_batch.get("batch_number") == batch_num and (not target_pls or last_batch.get("playlist_name", "").lower() == target_pls.lower()):
-                for a in last_batch.get("albums", []):
-                    albums_to_download.append(ResolvedAlbum(
-                        url=a["url"],
-                        album_name=a["album_name"],
-                        artist_name=a.get("artist_name", ""),
-                        tracks=a.get("tracks", []),
-                        cover_url=a.get("cover_url"),
-                    ))
-                for t in last_batch.get("tracks", []):
-                    tracks_to_download.append(ResolvedTrack(
-                        url=t["url"],
-                        title=t["title"],
-                        artist=t.get("artist", ""),
-                        cover_url=t.get("cover_url"),
-                    ))
-            else:
-                listener.send_reply(
-                    chat_id,
-                    f"🔍 <i>Consultando y resolviendo canciones de <b>{target_pls_name}</b> (Lote {batch_num})...</i>",
-                    thread_id,
-                )
-                query_names = {target_pls_name}
-                run_sync(
-                    navidrome=navidrome,
-                    telegram=None,
-                    state_tracker=state_tracker,
-                    target_names=query_names,
-                    fallback_to_track=fallback_to_track,
-                    force=True,
-                    dry_run=True,
-                    enricher=enricher,
-                    batch_number=batch_num,
-                    batch_size=batch_size,
-                )
-                fresh_batch = state_tracker.get_last_batch(target_pls_name)
-                if fresh_batch:
-                    for a in fresh_batch.get("albums", []):
-                        albums_to_download.append(ResolvedAlbum(
-                            url=a["url"],
-                            album_name=a["album_name"],
-                            artist_name=a.get("artist_name", ""),
-                            tracks=a.get("tracks", []),
-                            cover_url=a.get("cover_url"),
-                        ))
-                    for t in fresh_batch.get("tracks", []):
-                        tracks_to_download.append(ResolvedTrack(
-                            url=t["url"],
-                            title=t["title"],
-                            artist=t.get("artist", ""),
-                            cover_url=t.get("cover_url"),
-                        ))
-
-            total_items = len(albums_to_download) + len(tracks_to_download)
-            if total_items == 0:
-                listener.send_reply(
-                    chat_id,
-                    f"ℹ️ No se encontraron álbumes ni pistas pendientes para descargar en <b>{target_pls_name}</b>.",
-                    thread_id,
-                )
-                return
-
-            batch_desc = f"Lote {batch_num}" if not is_all else "Todos los lotes"
-            job = DownloadJob(
-                job_id=f"dl_{int(time.time()*1000)}",
-                chat_id=chat_id,
-                thread_id=thread_id,
-                title=f"Playlist {target_pls_name} ({batch_desc})",
-                albums=albums_to_download,
-                tracks=tracks_to_download,
-                source_desc=f"{target_pls_name} ({batch_desc})",
-            )
-
-            pos = download_queue.enqueue(job)
-            if pos > 0:
-                listener.send_reply(
-                    chat_id,
-                    f"⏳ <b>Añadido a la cola de descargas (Posición #{pos} en espera):</b>\n"
-                    f"• <b>{job.title}</b>\n"
-                    f"• Elementos: {total_items} ({len(albums_to_download)} álbumes, {len(tracks_to_download)} pistas)\n\n"
-                    f"<i>Se descargará automáticamente al finalizar las tareas en curso.</i>",
-                    thread_id,
-                )
-
-        active_disc_sessions: Dict[str, Dict[str, Any]] = {}
-
-        def on_add_disc_callback(chat_id: str, thread_id: Optional[str], message_id: int, cq_id: str, cq_data: str):
-            parts = cq_data.split(":")
-            action = parts[1] if len(parts) > 1 else ""
-            token = parts[2] if len(parts) > 2 else ""
-
-            sess = active_disc_sessions.get(token)
-            if not sess and action != "noop":
-                listener.answer_callback_query(cq_id, text="⚠️ La sesión ha expirado. Ejecuta /add nuevamente.", show_alert=True)
-                return
-
-            if action == "noop":
-                listener.answer_callback_query(cq_id)
-                return
-
-            elif action == "cancel":
-                active_disc_sessions.pop(token, None)
-                listener.answer_callback_query(cq_id, text="Descarga cancelada.")
-                listener.edit_message_text(chat_id, message_id, f"❌ <i>Descarga cancelada para <b>{html.escape(sess['artist'])}</b>.</i>")
-
-            elif action == "menu":
-                listener.answer_callback_query(cq_id)
-                text, markup, rich_msg = build_discography_menu(sess["artist"], len(sess["albums"]), len(sess["singles"]), token)
-                listener.edit_message_text(chat_id, message_id, text, reply_markup=markup, rich_message=rich_msg)
-
-            elif action == "check":
-                listener.answer_callback_query(cq_id)
-                page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
-                text, markup, rich_msg = build_checklist_menu(sess, token, page=page)
-                listener.edit_message_text(chat_id, message_id, text, reply_markup=markup, rich_message=rich_msg)
-
-            elif action == "tog":
-                idx = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else -1
-                page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 1
-                if idx in sess["selected"]:
-                    sess["selected"].remove(idx)
-                else:
-                    sess["selected"].add(idx)
-                listener.answer_callback_query(cq_id)
-                text, markup, rich_msg = build_checklist_menu(sess, token, page=page)
-                listener.edit_message_text(chat_id, message_id, text, reply_markup=markup, rich_message=rich_msg)
-
-            elif action == "inv":
-                page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
-                if len(sess["selected"]) == len(sess["albums"]):
-                    sess["selected"].clear()
-                else:
-                    sess["selected"] = set(range(len(sess["albums"])))
-                listener.answer_callback_query(cq_id)
-                text, markup, rich_msg = build_checklist_menu(sess, token, page=page)
-                listener.edit_message_text(chat_id, message_id, text, reply_markup=markup, rich_message=rich_msg)
-
-            elif action == "albums":
-                albums = sess["albums"]
-                if not albums:
-                    listener.answer_callback_query(cq_id, text="No hay álbumes de estudio disponibles.", show_alert=True)
-                    return
-                listener.answer_callback_query(cq_id, text=f"⏳ Descargando {len(albums)} álbumes...")
-                job = DownloadJob(
-                    job_id=f"add_{int(time.time()*1000)}",
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    title=f"{sess['artist']} [Álbumes de estudio]",
-                    albums=albums,
-                    tracks=[],
-                    source_desc=f"/add {sess['artist']} (Solo Álbumes)",
-                )
-                pos = download_queue.enqueue(job)
-                queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                listener.edit_message_text(
-                    chat_id,
-                    message_id,
-                    f"✅ <b>{html.escape(sess['artist'])}:</b> Se han añadido los <b>{len(albums)} álbumes de estudio</b> a la cola de descargas.{queue_note}",
-                )
-                active_disc_sessions.pop(token, None)
-
-            elif action == "singles":
-                singles = sess["singles"]
-                if not singles:
-                    listener.answer_callback_query(cq_id, text="No hay sencillos disponibles.", show_alert=True)
-                    return
-                listener.answer_callback_query(cq_id, text=f"⏳ Descargando {len(singles)} sencillos...")
-                job = DownloadJob(
-                    job_id=f"add_{int(time.time()*1000)}",
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    title=f"{sess['artist']} [Sencillos y EPs]",
-                    albums=singles,
-                    tracks=[],
-                    source_desc=f"/add {sess['artist']} (Solo Sencillos)",
-                )
-                pos = download_queue.enqueue(job)
-                queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                listener.edit_message_text(
-                    chat_id,
-                    message_id,
-                    f"✅ <b>{html.escape(sess['artist'])}</b>: Se han añadido los <b>{len(singles)} sencillos y EPs</b> a la cola de descargas.{queue_note}",
-                )
-                active_disc_sessions.pop(token, None)
-
-            elif action == "all":
-                all_items = sess["albums"] + sess["singles"]
-                listener.answer_callback_query(cq_id, text=f"⏳ Descargando discografía completa ({len(all_items)})...")
-                job = DownloadJob(
-                    job_id=f"add_{int(time.time()*1000)}",
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    title=f"{sess['artist']} [Discografía completa]",
-                    albums=all_items,
-                    tracks=[],
-                    source_desc=f"/add {sess['artist']} (Todo)",
-                )
-                pos = download_queue.enqueue(job)
-                queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                listener.edit_message_text(
-                    chat_id,
-                    message_id,
-                    f"✅ <b>{html.escape(sess['artist'])}</b>: Se ha añadido la discografía completa (<b>{len(all_items)} lanzamientos</b>) a la cola de descargas.{queue_note}",
-                )
-                active_disc_sessions.pop(token, None)
-
-            elif action == "dl_sel":
-                selected_idx = sorted(sess["selected"])
-                if not selected_idx:
-                    listener.answer_callback_query(cq_id, text="⚠️ No has seleccionado ningún álbum.", show_alert=True)
-                    return
-                selected_albums = [sess["albums"][i] for i in selected_idx]
-                listener.answer_callback_query(cq_id, text=f"⏳ Descargando {len(selected_albums)} álbumes seleccionados...")
-                job = DownloadJob(
-                    job_id=f"add_{int(time.time()*1000)}",
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    title=f"{sess['artist']} [{len(selected_albums)} álbumes seleccionados]",
-                    albums=selected_albums,
-                    tracks=[],
-                    source_desc=f"/add {sess['artist']} (Seleccionados)",
-                )
-                pos = download_queue.enqueue(job)
-                queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                listener.edit_message_text(
-                    chat_id,
-                    message_id,
-                    f"✅ <b>{html.escape(sess['artist'])}</b>: Se han añadido los <b>{len(selected_albums)} álbumes seleccionados</b> a la cola de descargas.{queue_note}",
-                )
-                active_disc_sessions.pop(token, None)
-
-        def on_add_command(chat_id: str, thread_id: Optional[str], raw_args: str):
-            listener.send_reply(
-                chat_id,
-                f"🔍 <i>Analizando solicitud:</i> <code>{raw_args}</code>...",
-                thread_id,
-            )
-
-            raw_lower = raw_args.lower()
-            filter_mode = None
-            clean_args = raw_args
-            if re.search(r'\b(?:solo\s+)?(?:albumes|álbumes|albums|discos)\b', raw_lower):
-                filter_mode = "albums"
-                clean_args = re.sub(r'\b(?:solo\s+)?(?:albumes|álbumes|albums|discos)\b', '', raw_args, flags=re.IGNORECASE).strip()
-            elif re.search(r'\b(?:solo\s+)?(?:singles|sencillos|eps)\b', raw_lower):
-                filter_mode = "singles"
-                clean_args = re.sub(r'\b(?:solo\s+)?(?:singles|sencillos|eps)\b', '', raw_args, flags=re.IGNORECASE).strip()
-            elif re.search(r'\b(?:todo|todos|all|completa|completo)\b', raw_lower):
-                filter_mode = "all"
-                clean_args = re.sub(r'\b(?:todo|todos|all|completa|completo)\b', '', raw_args, flags=re.IGNORECASE).strip()
-
-            if not clean_args:
-                clean_args = raw_args
-
-            res = universal_resolver.resolve_input(clean_args)
-            if res.get("status") != "success":
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ <b>No se pudo procesar la solicitud:</b>\n{res.get('message', 'Sin detalles')}",
-                    thread_id,
-                )
-                return
-
-            albums = res.get("albums", [])
-            tracks = res.get("tracks", [])
-            if not albums and not tracks:
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ No se encontraron álbumes ni pistas disponibles para: <code>{raw_args}</code>",
-                    thread_id,
-                )
-                return
-
-            kind = res.get("kind", "contenido")
-            title_msg = res.get("title", raw_args)
-            is_discography = ("total_albums" in res and "total_singles" in res) or kind == "artist"
-
-            if is_discography and albums:
-                studio_albums = [a for a in albums if not a.is_single]
-                singles = [a for a in albums if a.is_single]
-                artist_name = res.get("artist") or title_msg
-
-                # Clean up old sessions
-                now = time.time()
-                expired = [k for k, v in active_disc_sessions.items() if now - v.get("created_at", 0) > 7200]
-                for k in expired:
-                    active_disc_sessions.pop(k, None)
-
-                # Direct mode if user explicitly specified keywords
-                if filter_mode == "albums":
-                    target_list = studio_albums or albums
-                    job = DownloadJob(
-                        job_id=f"add_{int(time.time()*1000)}",
-                        chat_id=chat_id,
-                        thread_id=thread_id,
-                        title=f"{artist_name} [Álbumes de estudio]",
-                        albums=target_list,
-                        tracks=[],
-                        source_desc=f"/add {raw_args} (Solo Álbumes)",
-                    )
-                    pos = download_queue.enqueue(job)
-                    queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                    listener.send_reply(
-                        chat_id,
-                        f"💿 <b>{html.escape(artist_name)}</b>: Descargando los <b>{len(target_list)} álbumes de estudio</b>.{queue_note}",
-                        thread_id,
-                    )
-                    return
-
-                elif filter_mode == "singles":
-                    target_list = singles or albums
-                    job = DownloadJob(
-                        job_id=f"add_{int(time.time()*1000)}",
-                        chat_id=chat_id,
-                        thread_id=thread_id,
-                        title=f"{artist_name} [Sencillos y EPs]",
-                        albums=target_list,
-                        tracks=[],
-                        source_desc=f"/add {raw_args} (Solo Sencillos)",
-                    )
-                    pos = download_queue.enqueue(job)
-                    queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                    listener.send_reply(
-                        chat_id,
-                        f"🎵 <b>{html.escape(artist_name)}</b>: Descargando los <b>{len(target_list)} sencillos y EPs</b>.{queue_note}",
-                        thread_id,
-                    )
-                    return
-
-                elif filter_mode == "all":
-                    job = DownloadJob(
-                        job_id=f"add_{int(time.time()*1000)}",
-                        chat_id=chat_id,
-                        thread_id=thread_id,
-                        title=f"{artist_name} [Discografía completa]",
-                        albums=albums,
-                        tracks=tracks,
-                        source_desc=f"/add {raw_args} (Todo)",
-                    )
-                    pos = download_queue.enqueue(job)
-                    queue_note = f" (Posición #{pos} en cola)" if pos > 0 else " (Iniciando descarga inmediata)"
-                    listener.send_reply(
-                        chat_id,
-                        f"⚡ <b>{html.escape(artist_name)}</b>: Descargando discografía completa (<b>{len(albums)} lanzamientos</b>).{queue_note}",
-                        thread_id,
-                    )
-                    return
-
-                else:
-                    # Interactive selection card with checklist support
-                    token = uuid.uuid4().hex[:8]
-                    active_disc_sessions[token] = {
-                        "artist": artist_name,
-                        "albums": studio_albums,
-                        "singles": singles,
-                        "selected": set(range(len(studio_albums))),
-                        "chat_id": chat_id,
-                        "thread_id": thread_id,
-                        "created_at": time.time(),
-                    }
-                    menu_text, menu_markup, menu_rich = build_discography_menu(artist_name, len(studio_albums), len(singles), token)
-                    listener.send_reply(
-                        chat_id,
-                        menu_text,
-                        thread_id=thread_id,
-                        reply_markup=menu_markup,
-                        rich_message=menu_rich,
-                    )
-                    return
-
-            # Non-discography single item (track or single album)
-            job = DownloadJob(
-                job_id=f"add_{int(time.time()*1000)}",
-                chat_id=chat_id,
-                thread_id=thread_id,
-                title=f"{title_msg} [{kind}]",
-                albums=albums,
-                tracks=tracks,
-                source_desc=f"/add {raw_args}",
-            )
-            pos = download_queue.enqueue(job)
-            if pos > 0:
-                listener.send_reply(
-                    chat_id,
-                    f"⏳ <b>Añadido a la cola de descargas (Posición #{pos} en espera):</b>\n"
-                    f"• <b>{job.title}</b>\n"
-                    f"• Elementos: {len(albums) + len(tracks)}\n\n"
-                    f"<i>Se descargará automáticamente al finalizar las tareas previas.</i>",
-                    thread_id,
-                )
-
-        def on_discover_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            acc_note = f" (cuenta <b>{discoverer.account_name}</b>)" if discoverer.account_name else ""
-            listener.send_reply(
-                chat_id,
-                f"🎧 <i>Consultando recomendaciones en YouTube Music{acc_note} y filtrando álbumes existentes en Navidrome...</i>",
-                thread_id,
-            )
-            limit = 8
-            if raw_args and raw_args.strip().isdigit():
-                parsed = int(raw_args.strip())
-                if 1 <= parsed <= 25:
-                    limit = parsed
-
-            try:
-                recs = discoverer.get_recommendations(navidrome=navidrome, limit=limit)
-            except Exception as ex:
-                logger.error("Error obteniendo recomendaciones: %s", ex, exc_info=True)
-                listener.send_reply(chat_id, f"❌ <b>Error al consultar recomendaciones:</b> {ex}", thread_id)
-                return
-
-            if not recs:
-                listener.send_reply(
-                    chat_id,
-                    "✨ <b>¡Tu biblioteca está al día!</b>\nNo se encontraron nuevas recomendaciones en YouTube Music que no tengas ya en Navidrome.",
-                    thread_id,
-                )
-                return
-
-            state_tracker.save_last_discovered(recs)
-
-            items_lines = []
-            for idx, item in enumerate(recs, 1):
-                kind_icon = "💿" if item.get("kind") == "album" else "🎵"
-                title = html.escape(item.get("title", "Desconocido"))
-                artist = html.escape(item.get("artist", "Desconocido"))
-                year = item.get("year", "")
-                tracks_cnt = item.get("track_count", 0)
-                extra = []
-                if year:
-                    extra.append(year)
-                if tracks_cnt > 1:
-                    extra.append(f"{tracks_cnt} pistas")
-                extra_str = f" ({', '.join(extra)})" if extra else ""
-
-                src_trk = item.get("source_track")
-                if src_trk and src_trk.strip().lower() != item.get("title", "").strip().lower():
-                    trk_note = f" <i>(incluye «{html.escape(src_trk)}»)</i>"
-                else:
-                    trk_note = ""
-
-                items_lines.append(f"<b>{idx}.</b> {kind_icon} <b>{title}</b>{trk_note}\n   👤 <i>{artist}</i>{extra_str}")
-
-            keyboard = []
-            row = []
-            for idx, item in enumerate(recs, 1):
-                short_art = item.get("artist", "")
-                if "," in short_art:
-                    short_art = short_art.split(",")[0].strip()
-                short_art = (short_art[:13] + "..") if len(short_art) > 15 else short_art
-                btn_text = f"💿 {idx}. {short_art}" if short_art else f"💿 #{idx}"
-                row.append({"text": btn_text, "callback_data": f"dl_rec:{idx}"})
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-            keyboard.append([{"text": f"⚡ Descargar Todos los Álbumes ({len(recs)})", "callback_data": "dl_rec:all"}])
-            reply_markup = {"inline_keyboard": keyboard}
-
-            content = (
-                "✨ <b>Recomendaciones de YouTube Music</b>\n"
-                f"<i>Filtradas contra tu biblioteca ({len(recs)} sugerencias no añadidas):</i>\n\n"
-                "<blockquote>\n" + "\n\n".join(items_lines) + "\n</blockquote>\n\n"
-                "⚡ <i>Descarga en 1 toque con los botones de abajo o escribe</i> <code>/dl_rec [N | all]</code>"
-            )
-
-            top_cover = recs[0].get("cover_url") if recs and recs[0].get("cover_url") else None
-            listener.send_reply(
-                chat_id,
-                content,
-                thread_id=thread_id,
-                photo_url=top_cover,
-                reply_markup=reply_markup,
-            )
-
-        def on_new_releases_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            acc_note = f" (cuenta <b>{discoverer.account_name}</b>)" if discoverer.account_name else ""
-            listener.send_reply(
-                chat_id,
-                f"🆕 <i>Buscando nuevos lanzamientos en YouTube Music{acc_note} y filtrando contra Navidrome...</i>",
-                thread_id,
-            )
-            limit = 8
-            if raw_args and raw_args.strip().isdigit():
-                parsed = int(raw_args.strip())
-                if 1 <= parsed <= 25:
-                    limit = parsed
-
-            try:
-                releases = discoverer.get_new_releases(navidrome=navidrome, limit=limit)
-            except Exception as ex:
-                logger.error("Error obteniendo novedades: %s", ex, exc_info=True)
-                listener.send_reply(chat_id, f"❌ <b>Error al consultar nuevos lanzamientos:</b> {ex}", thread_id)
-                return
-
-            if not releases:
-                listener.send_reply(
-                    chat_id,
-                    "✨ <b>¡Tu biblioteca está al día con los estrenos!</b>\nNo se encontraron nuevos lanzamientos pendientes de añadir.",
-                    thread_id,
-                )
-                return
-
-            state_tracker.save_last_new_releases(releases)
-
-            items_lines = []
-            for idx, item in enumerate(releases, 1):
-                kind_icon = "💿" if item.get("kind") == "album" else "🎵"
-                title = html.escape(item.get("title", "Desconocido"))
-                artist = html.escape(item.get("artist", "Desconocido"))
-                year = item.get("year", "")
-                tracks_cnt = item.get("track_count", 0)
-                extra = []
-                if year:
-                    extra.append(year)
-                if tracks_cnt > 1:
-                    extra.append(f"{tracks_cnt} pistas")
-                extra_str = f" ({', '.join(extra)})" if extra else ""
-
-                src_trk = item.get("source_track")
-                if src_trk and src_trk.strip().lower() != item.get("title", "").strip().lower():
-                    trk_note = f" <i>(incluye «{html.escape(src_trk)}»)</i>"
-                else:
-                    trk_note = ""
-
-                items_lines.append(f"<b>{idx}.</b> {kind_icon} <b>{title}</b>{trk_note}\n   👤 <i>{artist}</i>{extra_str}")
-
-            keyboard = []
-            row = []
-            for idx, item in enumerate(releases, 1):
-                short_art = item.get("artist", "")
-                if "," in short_art:
-                    short_art = short_art.split(",")[0].strip()
-                short_art = (short_art[:13] + "..") if len(short_art) > 15 else short_art
-                btn_text = f"🔥 {idx}. {short_art}" if short_art else f"🔥 #{idx}"
-                row.append({"text": btn_text, "callback_data": f"dl_nov:{idx}"})
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-            keyboard.append([{"text": f"⚡ Descargar Todas las Novedades ({len(releases)})", "callback_data": "dl_nov:all"}])
-            reply_markup = {"inline_keyboard": keyboard}
-
-            content = (
-                "🔥 <b>Nuevos Lanzamientos & Estrenos de YouTube Music</b>\n"
-                f"<i>Filtrados contra tu biblioteca ({len(releases)} novedades no añadidas):</i>\n\n"
-                "<blockquote>\n" + "\n\n".join(items_lines) + "\n</blockquote>\n\n"
-                "⚡ <i>Descarga en 1 toque con los botones de abajo o escribe</i> <code>/dl_nov [N | all]</code>"
-            )
-
-            top_cover = releases[0].get("cover_url") if releases and releases[0].get("cover_url") else None
-            listener.send_reply(
-                chat_id,
-                content,
-                thread_id=thread_id,
-                photo_url=top_cover,
-                reply_markup=reply_markup,
-            )
-
-        def on_download_rec_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            items = state_tracker.get_last_discovered()
-            if not items:
-                listener.send_reply(
-                    chat_id,
-                    "⚠️ No hay recomendaciones recientes registradas en memoria.\n"
-                    "Ejecuta primero <code>/descubrir</code> para consultar sugerencias.",
-                    thread_id,
-                )
-                return
-
-            arg = (raw_args or "1").strip().lower()
-            selected_items: List[Dict[str, Any]] = []
-            if arg in ("all", "todo", "todos"):
-                selected_items = items
-                job_title = f"Lote de Recomendaciones ({len(selected_items)} álbumes)"
-            elif arg.isdigit():
-                idx = int(arg)
-                if 1 <= idx <= len(items):
-                    selected_items = [items[idx - 1]]
-                    sel = selected_items[0]
-                    job_title = f"Recomendación: {sel.get('title')} - {sel.get('artist')}"
-                else:
-                    listener.send_reply(
-                        chat_id,
-                        f"⚠️ Número inválido. Por favor indica un número entre 1 y {len(items)}, o <code>all</code>.\n"
-                        f"Ejemplo: <code>/dl_rec 1</code>",
-                        thread_id,
-                    )
-                    return
-            else:
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ Comando no reconocido. Usa <code>/dl_rec [1-{len(items)}]</code> o <code>/dl_rec all</code>.",
-                    thread_id,
-                )
-                return
-
-            albums_to_download: List[ResolvedAlbum] = []
-            tracks_to_download: List[ResolvedTrack] = []
-
-            for it in selected_items:
-                if it.get("kind") == "album":
-                    albums_to_download.append(ResolvedAlbum(
-                        url=it["url"],
-                        album_name=it["title"],
-                        artist_name=it.get("artist", ""),
-                        tracks=it.get("tracks", []),
-                    ))
-                else:
-                    tracks_to_download.append(ResolvedTrack(
-                        url=it["url"],
-                        title=it["title"],
-                        artist=it.get("artist", ""),
-                    ))
-
-            job = DownloadJob(
-                job_id=f"rec_{int(time.time()*1000)}",
-                chat_id=chat_id,
-                thread_id=thread_id,
-                title=job_title,
-                albums=albums_to_download,
-                tracks=tracks_to_download,
-                source_desc=f"/dl_rec {arg}",
-            )
-
-            pos = download_queue.enqueue(job)
-            if pos > 0:
-                listener.send_reply(
-                    chat_id,
-                    f"⏳ <b>Añadido a la cola de descargas (Posición #{pos} en espera):</b>\n"
-                    f"• <b>{job.title}</b>\n"
-                    f"• Elementos: {len(albums_to_download) + len(tracks_to_download)}\n\n"
-                    f"<i>Se descargará automáticamente al finalizar las tareas en curso.</i>",
-                    thread_id,
-                )
-
-        def on_download_nov_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            items = state_tracker.get_last_new_releases()
-            if not items:
-                listener.send_reply(
-                    chat_id,
-                    "⚠️ No hay novedades recientes registradas en memoria.\n"
-                    "Ejecuta primero <code>/novedades</code> para consultar estrenos.",
-                    thread_id,
-                )
-                return
-
-            arg = (raw_args or "1").strip().lower()
-            selected_items: List[Dict[str, Any]] = []
-            if arg in ("all", "todo", "todos"):
-                selected_items = items
-                job_title = f"Lote de Novedades ({len(selected_items)} álbumes)"
-            elif arg.isdigit():
-                idx = int(arg)
-                if 1 <= idx <= len(items):
-                    selected_items = [items[idx - 1]]
-                    sel = selected_items[0]
-                    job_title = f"Novedad: {sel.get('title')} - {sel.get('artist')}"
-                else:
-                    listener.send_reply(
-                        chat_id,
-                        f"⚠️ Número inválido. Por favor indica un número entre 1 y {len(items)}, o <code>all</code>.\n"
-                        f"Ejemplo: <code>/dl_nov 1</code>",
-                        thread_id,
-                    )
-                    return
-            else:
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ Comando no reconocido. Usa <code>/dl_nov [1-{len(items)}]</code> o <code>/dl_nov all</code>.",
-                    thread_id,
-                )
-                return
-
-            albums_to_download: List[ResolvedAlbum] = []
-            tracks_to_download: List[ResolvedTrack] = []
-
-            for it in selected_items:
-                if it.get("kind") == "album":
-                    albums_to_download.append(ResolvedAlbum(
-                        url=it["url"],
-                        album_name=it["title"],
-                        artist_name=it.get("artist", ""),
-                        tracks=it.get("tracks", []),
-                    ))
-                else:
-                    tracks_to_download.append(ResolvedTrack(
-                        url=it["url"],
-                        title=it["title"],
-                        artist=it.get("artist", ""),
-                    ))
-
-            job = DownloadJob(
-                job_id=f"nov_{int(time.time()*1000)}",
-                chat_id=chat_id,
-                thread_id=thread_id,
-                title=job_title,
-                albums=albums_to_download,
-                tracks=tracks_to_download,
-                source_desc=f"/dl_nov {arg}",
-            )
-
-            pos = download_queue.enqueue(job)
-            if pos > 0:
-                listener.send_reply(
-                    chat_id,
-                    f"⏳ <b>Añadido a la cola de descargas (Posición #{pos} en espera):</b>\n"
-                    f"• <b>{job.title}</b>\n"
-                    f"• Elementos: {len(albums_to_download) + len(tracks_to_download)}\n\n"
-                    f"<i>Se descargará automáticamente al finalizar las tareas en curso.</i>",
-                    thread_id,
-                )
-
-        def on_sync_command(chat_id: str, thread_id: Optional[str], raw_args: Optional[str] = None):
-            current_limit = state_tracker.get_limit(default_limit=default_max_albums)
-            target_pls, batch_num, batch_size = parse_sync_args(raw_args, default_limit=current_limit)
-            query_names = {target_pls} if target_pls else target_names
-            logger.info(
-                "Bot /sync triggered for playlists: %s from chat %s (thread: %s) [Lote: %d, Limit: %d]",
-                query_names, chat_id, thread_id, batch_num, batch_size
-            )
-            cmd_target = f"{chat_id}:{thread_id}" if thread_id else chat_id
-            cmd_telegram = TelegramSender(
-                bot_token=tg_token,
-                chat_id=cmd_target,
-                thread_id=thread_id,
-                quote_style=tg_style,
-            )
-            found_count, processed_count = run_sync(
-                navidrome=navidrome,
-                telegram=cmd_telegram,
-                state_tracker=state_tracker,
-                target_names=query_names,
-                fallback_to_track=fallback_to_track,
-                force=True,
-                dry_run=False,
-                enricher=enricher,
-                batch_number=batch_num,
-                batch_size=batch_size,
-            )
-            if found_count == 0:
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ No se encontró ninguna playlist en Navidrome que coincida con: <code>{', '.join(query_names)}</code>",
-                    thread_id,
-                )
-            elif processed_count == 0:
-                listener.send_reply(
-                    chat_id,
-                    f"✅ <b>Todo al día:</b> La playlist <code>{', '.join(query_names)}</code> no tiene canciones faltantes registradas en sus comentarios.",
-                    thread_id,
-                )
-            else:
-                last_batch = state_tracker.get_last_batch()
-                remaining_albums = len(last_batch.get("albums", [])) if last_batch else 0
-                remaining_tracks = len(last_batch.get("tracks", [])) if last_batch else 0
-                tot_rem = remaining_albums + remaining_tracks
-                pls_label = f"{processed_count} playlists" if processed_count > 1 else f"{processed_count} playlist"
-
-                if tot_rem == 0:
-                    summary_text = (
-                        f"✅ <b>Sincronización completada ({pls_label} analizadas):</b>\n"
-                        f"• Todas las canciones faltantes ya se encontraban en tu biblioteca local y fueron auto-inyectadas a Navidrome.\n"
-                        f"• <i>No quedan álbumes ni temas pendientes por descargar.</i>"
-                    )
-                    rich_summary = {
-                        "blocks": [
-                            {
-                                "type": "heading",
-                                "text": f"✅ Sincronización completada ({pls_label})",
-                                "size": 2,
-                            },
-                            {
-                                "type": "paragraph",
-                                "text": "Todas las canciones faltantes ya se encontraban en tu biblioteca local y fueron auto-inyectadas a Navidrome. No quedan álbumes ni temas pendientes por descargar.",
-                            },
-                        ]
-                    }
-                    listener.send_reply(chat_id, summary_text, thread_id, rich_message=rich_summary)
-                else:
-                    tot_batches = last_batch.get("total_batches", 1) if last_batch else 1
-                    dl_cb = f"sync_dl:{target_pls[:40]} all".strip() if target_pls else "sync_dl:all"
-
-                    summary_text = (
-                        f"✅ <b>Sincronización completada ({pls_label} analizadas):</b>\n"
-                        f"• Se inyectaron temas existentes en Navidrome y se actualizaron comentarios.\n"
-                        f"• Quedan <b>{tot_rem}</b> elementos pendientes (Lote {batch_num} de {tot_batches}).\n"
-                        f"• <i>Toca el botón abajo para descargarlos con el bot o cópialos a MediaHuman.</i>"
-                    )
-                    rich_summary = {
-                        "blocks": [
-                            {
-                                "type": "heading",
-                                "text": f"✅ Sincronización completada ({pls_label})",
-                                "size": 2,
-                            },
-                            {
-                                "type": "list",
-                                "items": [
-                                    {"blocks": [{"type": "paragraph", "text": "Se inyectaron temas existentes en Navidrome y se actualizaron comentarios."}]},
-                                    {"blocks": [{"type": "paragraph", "text": f"Quedan {tot_rem} elementos pendientes de descarga (Lote {batch_num} de {tot_batches})."}]},
-                                ],
-                            },
-                            {
-                                "type": "buttons",
-                                "buttons": [
-                                    {
-                                        "text": f"⚡ Descargar Todas las Canciones ({tot_rem})",
-                                        "callback_data": dl_cb,
-                                        "style": "success",
-                                    }
-                                ],
-                            },
-                        ]
-                    }
-                    fallback_markup = {
-                        "inline_keyboard": [
-                            [{"text": f"⚡ Descargar Todas las Canciones ({tot_rem})", "callback_data": dl_cb, "style": "success"}]
-                        ]
-                    }
-                    listener.send_reply(
-                        chat_id,
-                        summary_text,
-                        thread_id,
-                        reply_markup=fallback_markup,
-                        rich_message=rich_summary,
-                    )
-
-        def on_limit_command(raw_args: str) -> str:
-            args_str = raw_args.strip()
-            if not args_str:
-                curr = state_tracker.get_limit(default_limit=default_max_albums)
-                limit_str = f"<b>{curr}</b> álbumes por lote" if curr > 0 else "<b>Sin límite</b> (todos los álbumes)"
-                return (
-                    "⚙️ <b>Configuración de Límite por Lote</b>\n\n"
-                    f"• <b>Límite actual:</b> {limit_str}\n"
-                    "• <b>Prioridad:</b> Los álbumes con mayor cantidad de temas faltantes van primero.\n\n"
-                    "Para cambiar el límite predeterminado, envía:\n"
-                    "<code>/limit [cantidad]</code> (ej. <code>/limit 20</code>, <code>/limit 30</code> o <code>/limit 0</code> para sin límite).\n\n"
-                    "<i>También puedes pedir un lote específico directamente con <code>/sync [Nombre] lote 2</code>.</i>"
-                )
-
-            try:
-                val = int(args_str.split()[0])
-            except ValueError:
-                return "❌ Por favor indica un número entero válido. Ejemplo: <code>/limit 20</code> (o <code>/limit 0</code> para sin límite)."
-
-            if val < 0:
-                return "❌ La cantidad no puede ser negativa. Usa <code>/limit 20</code> o <code>/limit 0</code> para sin límite."
-
-            state_tracker.set_limit(val)
-            if val == 0:
-                return (
-                    "⚙️ <b>Límite actualizado:</b> Ahora se entregarán <b>todos</b> los álbumes en un solo lote (sin límite)."
-                )
-            return (
-                f"⚙️ <b>Límite actualizado:</b> Ahora cada sincronización entregará los <b>{val}</b> álbumes prioritarios por lote.\n\n"
-                f"💡 <i>Los álbumes están ordenados de mayor a menor cantidad de canciones faltantes. Puedes pedir los siguientes enviando <code>/sync [Playlist] lote 2</code>.</i>"
-            )
-
-        def on_status_command() -> str:
-            pls_str = ", ".join(target_names) if target_names else "Todas las playlists"
-            last_sync = "Nunca"
-            if state_tracker.state:
-                times = [v.get("last_processed") for k, v in state_tracker.state.items() if isinstance(v, dict) and v.get("last_processed")]
-                if times:
-                    last_sync = max(times)
-            curr_limit = state_tracker.get_limit(default_limit=default_max_albums)
-            limit_str = f"{curr_limit} álbumes" if curr_limit > 0 else "Sin límite"
-            dl_status = download_queue.get_status()
-            win_dest = to_windows_path(library_music_dir)
-            ytm_status = f"Conectado ({discoverer.account_name})" if discoverer.is_authenticated else "Modo público"
-            return (
-                "🤖 <b>ListenBrainz Navidrome Notifier Bot</b>\n\n"
-                f"• <b>Playlists vigiladas:</b> <code>{pls_str}</code>\n"
-                f"• <b>Servidor Navidrome:</b> <code>{nav_url}</code>\n"
-                f"• <b>YouTube Music:</b> <code>{ytm_status}</code>\n"
-                f"• <b>Límite por lote:</b> <code>{limit_str}</code> (modificar con <code>/limit [N]</code>)\n"
-                f"• <b>Motor de descarga:</b> <code>{dl_status}</code>\n"
-                f"• <b>Caché temporal (SSD):</b> <code>{download_music_dir}</code>\n"
-                f"• <b>Biblioteca final (HDD):</b> <code>{library_music_dir}</code> ({win_dest})\n"
-                f"• <b>Última comprobación:</b> <code>{last_sync}</code>\n"
-                f"• <b>Intervalo programado:</b> cada {daemon_interval} min\n\n"
-                "<i>Envía <code>/sync</code> para lotes, <code>/descubrir</code> para recomendaciones, <code>/novedades</code> para estrenos o <code>/add</code> para demanda.</i>"
-            )
-
-        def on_discard_command(chat_id: str, thread_id: Optional[str], raw_args: str):
-            clean_args = (raw_args or "").strip()
-            if not clean_args or clean_args.lower() in ("lista", "list", "ver"):
-                ignored = state_tracker.get_ignored()
-                if not ignored:
-                    listener.send_reply(
-                        chat_id,
-                        "🗑 <b>Gestión de Temas Descartados / Ignorados</b>\n\n"
-                        "<i>No hay ningún tema ni álbum en la lista de descartados.</i>\n\n"
-                        "<b>¿Cómo descartar?</b>\n"
-                        "• <code>/descartar 1</code> (descarta el elemento #1 del último lote de <code>/sync</code>)\n"
-                        "• <code>/descartar 1, 3</code> (descarta múltiples elementos del lote)\n"
-                        "• <code>/descartar [nombre de canción o álbum]</code>\n"
-                        "• <code>/descartar limpiar</code> (vacía la lista completa)\n"
-                        "• <code>/restaurar [nombre o número]</code> (vuelve a permitirlo)",
-                        thread_id,
-                    )
-                    return
-
-                items_text = []
-                for i, item in enumerate(ignored, 1):
-                    art = f" ({html.escape(item['artist'])})" if item.get("artist") else ""
-                    date_str = item.get("added_at", "").split("T")[0]
-                    items_text.append(f"• <b>#{i}</b>: <b>{html.escape(item['name'])}</b>{art} <i>({date_str})</i>")
-
-                body = "\n".join(items_text[:40])
-                extra = f"\n<i>...y {len(ignored) - 40} más.</i>" if len(ignored) > 40 else ""
-                listener.send_reply(
-                    chat_id,
-                    f"🗑 <b>Temas y Álbumes Descartados ({len(ignored)}):</b>\n"
-                    "<i>Estos elementos se omiten permanentemente de futuros /sync y descargas pendientes.</i>\n\n"
-                    f"{body}{extra}\n\n"
-                    "💡 <i>Para restaurar uno: <code>/restaurar [número o nombre]</code>.</i>\n"
-                    "💡 <i>Para vaciar la lista: <code>/descartar limpiar</code>.</i>",
-                    thread_id,
-                )
-                return
-
-            if clean_args.lower() in ("limpiar", "clear", "reset", "borrar"):
-                cnt = state_tracker.clear_ignored()
-                listener.send_reply(
-                    chat_id,
-                    f"🗑 <b>Lista de descartados vaciada:</b> Se restauraron <b>{cnt}</b> elementos. Volverán a considerarse en las siguientes sincronizaciones.",
-                    thread_id,
-                )
-                return
-
-            # Check if arguments represent numbers/indices from the active batch
-            # Supported: "1", "1, 2, 3", "1-3", "1 3"
-            parts = re.split(r"[\s,]+", clean_args)
-            indices = set()
-            is_index_mode = True
-            for part in parts:
-                if not part:
-                    continue
-                if "-" in part and part.replace("-", "").isdigit():
-                    start_s, end_s = part.split("-", 1)
-                    if start_s.isdigit() and end_s.isdigit():
-                        s, e = int(start_s), int(end_s)
-                        for x in range(min(s, e), max(s, e) + 1):
-                            indices.add(x)
-                    else:
-                        is_index_mode = False
-                        break
-                elif part.isdigit():
-                    indices.add(int(part))
-                else:
-                    is_index_mode = False
-                    break
-
-            last_batch = state_tracker.get_last_batch()
-            if is_index_mode and indices and last_batch and (last_batch.get("albums") or last_batch.get("tracks")):
-                batch_albums = list(last_batch.get("albums", []))
-                batch_tracks = list(last_batch.get("tracks", []))
-                total_items = len(batch_albums) + len(batch_tracks)
-
-                discarded_names = []
-                remaining_albums = []
-                remaining_tracks = []
-
-                for idx, a in enumerate(batch_albums, 1):
-                    if idx in indices:
-                        alb_name = a["album_name"]
-                        art_name = a.get("artist_name", "")
-                        state_tracker.add_ignored(alb_name, art_name)
-                        for t in a.get("tracks", []):
-                            state_tracker.add_ignored(t, art_name)
-                        discarded_names.append(f"💿 <b>{html.escape(alb_name)}</b> ({html.escape(art_name)})")
-                    else:
-                        remaining_albums.append(a)
-
-                for trk_idx, t in enumerate(batch_tracks, len(batch_albums) + 1):
-                    if trk_idx in indices:
-                        title = t["title"]
-                        art_name = t.get("artist", "")
-                        state_tracker.add_ignored(title, art_name)
-                        discarded_names.append(f"🎵 <b>{html.escape(title)}</b> ({html.escape(art_name)})")
-                    else:
-                        remaining_tracks.append(t)
-
-                if discarded_names:
-                    last_batch["albums"] = remaining_albums
-                    last_batch["tracks"] = remaining_tracks
-                    state_tracker.save()
-
-                    # Clean playlist comment in Navidrome immediately
-                    try:
-                        discarded_titles_set = set()
-                        for a in batch_albums:
-                            if a not in remaining_albums:
-                                discarded_titles_set.add(a.get("album_name", ""))
-                                discarded_titles_set.update(a.get("tracks", []))
-                        for t in batch_tracks:
-                            if t not in remaining_tracks:
-                                discarded_titles_set.add(t.get("title", ""))
-                        if discarded_titles_set:
-                            for pls in navidrome.get_playlists():
-                                p_name = pls.get("name", "")
-                                if not target_names or p_name in target_names or any(tn.lower() in p_name.lower() for tn in target_names):
-                                    pid = pls.get("id")
-                                    p_det = navidrome.get_playlist_details(pid)
-                                    p_comm = p_det.get("comment", "")
-                                    if p_comm and ("Tracks not found" in p_comm or "Tracks not matched" in p_comm):
-                                        updated_comm = TrackParser.rebuild_comment_without_tracks(p_comm, discarded_titles_set)
-                                        if updated_comm != p_comm:
-                                            navidrome.update_playlist_comment(pid, updated_comm)
-                                            logger.info("Updated playlist '%s' comment after /descartar", p_name)
-                    except Exception as ce:
-                        logger.warning("Error updating playlist comments on discard: %s", ce)
-
-                    disc_list_str = "\n".join(f"• {x}" for x in discarded_names)
-                    rem_count = len(remaining_albums) + len(remaining_tracks)
-                    listener.send_reply(
-                        chat_id,
-                        f"🗑 <b>Elementos Descartados del Lote ({len(discarded_names)}):</b>\n"
-                        f"{disc_list_str}\n\n"
-                        f"✅ <i>Añadidos a la lista negra permanente y removidos de los pendientes. Quedan <b>{rem_count}</b> elementos en el lote actual.</i>",
-                        thread_id,
-                    )
-                    return
-
-            # Free text discard mode (by title or album name)
-            state_tracker.add_ignored(clean_args)
-            if last_batch:
-                rem_albs = [a for a in last_batch.get("albums", []) if not state_tracker.is_ignored(a["album_name"], a.get("artist_name"))]
-                rem_trks = [t for t in last_batch.get("tracks", []) if not state_tracker.is_ignored(t["title"], t.get("artist"))]
-                last_batch["albums"] = rem_albs
-                last_batch["tracks"] = rem_trks
-                state_tracker.save()
-
-            # Clean playlist comment in Navidrome immediately for free text
-            try:
-                for pls in navidrome.get_playlists():
-                    p_name = pls.get("name", "")
-                    if not target_names or p_name in target_names or any(tn.lower() in p_name.lower() for tn in target_names):
-                        pid = pls.get("id")
-                        p_det = navidrome.get_playlist_details(pid)
-                        p_comm = p_det.get("comment", "")
-                        if p_comm and ("Tracks not found" in p_comm or "Tracks not matched" in p_comm):
-                            updated_comm = TrackParser.rebuild_comment_without_tracks(p_comm, {clean_args})
-                            if updated_comm != p_comm:
-                                navidrome.update_playlist_comment(pid, updated_comm)
-                                logger.info("Updated playlist '%s' comment after /descartar '%s'", p_name, clean_args)
-            except Exception as ce:
-                logger.warning("Error updating playlist comments on discard: %s", ce)
-
-            listener.send_reply(
-                chat_id,
-                f"🗑 <b>Elemento Descartado con Éxito:</b>\n"
-                f"• <b>{html.escape(clean_args)}</b>\n\n"
-                "✅ <i>Añadido a la lista negra permanente y eliminado de la descripción en Navidrome. Se omitirá de todas las futuras sincronizaciones.</i>",
-                thread_id,
-            )
-
-        def on_restore_command(chat_id: str, thread_id: Optional[str], raw_args: str):
-            clean_args = (raw_args or "").strip()
-            if not clean_args:
-                listener.send_reply(
-                    chat_id,
-                    "ℹ️ <b>Uso de /restaurar:</b>\n"
-                    "• <code>/restaurar [número]</code> (ej. <code>/restaurar 1</code>)\n"
-                    "• <code>/restaurar [nombre]</code> (ej. <code>/restaurar Tokyo Flash</code>)\n\n"
-                    "<i>Consulta la lista de temas descartados con <code>/descartar lista</code>.</i>",
-                    thread_id,
-                )
-                return
-
-            success = state_tracker.remove_ignored(clean_args)
-            if success:
-                listener.send_reply(
-                    chat_id,
-                    f"✅ <b>Elemento restaurado con éxito:</b>\n"
-                    f"• <code>{html.escape(clean_args)}</code>\n\n"
-                    "<i>Ya no está en la lista de ignorados y volverá a ser analizado en el próximo /sync.</i>",
-                    thread_id,
-                )
-            else:
-                listener.send_reply(
-                    chat_id,
-                    f"⚠️ No se encontró ningún elemento en la lista de descartados que coincida con: <code>{html.escape(clean_args)}</code>.\n"
-                    "<i>Revisa los elementos existentes con <code>/descartar lista</code>.</i>",
-                    thread_id,
-                )
+        # Initialize handlers
+        disc_handler = DiscographyHandler(
+            download_queue=download_queue,
+            universal_resolver=universal_resolver,
+            navidrome=navidrome,
+            state_tracker=state_tracker,
+            enricher=enricher,
+            target_names_ordered=target_names_ordered,
+            default_max_albums=default_max_albums,
+            fallback_to_track=fallback_to_track,
+            session_cache_file=script_dir / ".disc_sessions.json",
+        )
+
+        sync_handler = SyncHandler(
+            navidrome=navidrome,
+            state_tracker=state_tracker,
+            target_names=target_names,
+            default_max_albums=default_max_albums,
+            fallback_to_track=fallback_to_track,
+            enricher=enricher,
+            tg_token=tg_token,
+            tg_style=tg_style,
+        )
+
+        discovery_handler = DiscoveryHandler(
+            discoverer=discoverer,
+            navidrome=navidrome,
+            state_tracker=state_tracker,
+            download_queue=download_queue,
+        )
+
+        system_handler = SystemHandler(
+            state_tracker=state_tracker,
+            download_queue=download_queue,
+            navidrome=navidrome,
+            discoverer=discoverer,
+            target_names=target_names,
+            default_max_albums=default_max_albums,
+            daemon_interval=daemon_interval,
+            nav_url=nav_url,
+            download_music_dir=download_music_dir,
+            library_music_dir=library_music_dir,
+        )
 
         authorized_chats = [t.chat_id for t in telegram.targets]
         listener = TelegramBotListener(
             bot_token=tg_token,
             authorized_chat_ids=authorized_chats,
-            on_sync_command=on_sync_command,
-            on_status_command=on_status_command,
-            on_limit_command=on_limit_command,
-            on_download_command=on_download_command,
-            on_add_command=on_add_command,
-            on_discover_command=on_discover_command,
-            on_new_releases_command=on_new_releases_command,
-            on_download_rec_command=on_download_rec_command,
-            on_download_nov_command=on_download_nov_command,
-            on_add_disc_callback=on_add_disc_callback,
-            on_discard_command=on_discard_command,
-            on_restore_command=on_restore_command,
+            on_sync_command=sync_handler.on_sync_command,
+            on_status_command=system_handler.on_status_command,
+            on_limit_command=system_handler.on_limit_command,
+            on_download_command=disc_handler.on_download_command,
+            on_add_command=disc_handler.on_add_command,
+            on_discover_command=discovery_handler.on_discover_command,
+            on_new_releases_command=discovery_handler.on_new_releases_command,
+            on_download_rec_command=discovery_handler.on_download_rec_command,
+            on_download_nov_command=discovery_handler.on_download_nov_command,
+            on_add_disc_callback=disc_handler.on_add_disc_callback,
+            on_retry_failed_callback=disc_handler.on_retry_failed_callback,
+            on_discard_command=system_handler.on_discard_command,
+            on_restore_command=system_handler.on_restore_command,
+            on_injected_command=sync_handler.on_injected_command,
+            on_incompletos_command=system_handler.on_incompletos_command,
+            on_unificar_command=system_handler.on_unificar_command,
+            on_noche_command=system_handler.on_noche_command,
+            on_fallidos_command=system_handler.on_fallidos_command,
+            on_reintentar_fallidos_command=system_handler.on_reintentar_fallidos_command,
+            on_completar_command=system_handler.on_completar_command,
+            on_download_incomplete_batch_callback=system_handler.on_download_incomplete_batch_callback,
             state_tracker=state_tracker,
         )
+
+        disc_handler.set_listener(listener)
+        sync_handler.set_listener(listener)
+        discovery_handler.set_listener(listener)
+        system_handler.set_listener(listener)
+
         download_queue.listener = listener
         listener.download_worker = download_queue
 
-        def background_scheduler():
-            logger.info("Background timer scheduler started (every %d min).", daemon_interval)
-            while listener.running:
-                time.sleep(daemon_interval * 60)
-                if not listener.running:
-                    break
-                try:
-                    logger.info("Executing scheduled periodic check for playlists...")
-                    curr_limit = state_tracker.get_limit(default_limit=default_max_albums)
-                    run_sync(
-                        navidrome=navidrome,
-                        telegram=telegram,
-                        state_tracker=state_tracker,
-                        target_names=target_names,
-                        fallback_to_track=fallback_to_track,
-                        force=False,
-                        dry_run=False,
-                        enricher=enricher,
-                        batch_number=1,
-                        batch_size=curr_limit,
-                    )
-                    try:
-                        import gc
-                        gc.collect()
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logger.error("Error in scheduled periodic check: %s", e, exc_info=True)
-
-        sched_thread = threading.Thread(target=background_scheduler, daemon=True)
-        sched_thread.start()
+        start_background_scheduler(
+            listener=listener,
+            daemon_interval=daemon_interval,
+            navidrome=navidrome,
+            telegram=telegram,
+            state_tracker=state_tracker,
+            target_names=target_names,
+            fallback_to_track=fallback_to_track,
+            enricher=enricher,
+            default_max_albums=default_max_albums,
+        )
 
         try:
             listener.start_polling_loop()
