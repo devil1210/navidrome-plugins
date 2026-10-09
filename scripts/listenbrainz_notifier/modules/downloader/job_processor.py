@@ -332,8 +332,16 @@ def process_download_job(queue: Any, job: DownloadJob):
             else:
                 nav_cnt = len(nav_tracks)
                 is_single = getattr(album, "is_single", False) or is_single_release
-                if is_single or nav_cnt >= 8:
-                    logger.info("El %s '%s' de '%s' ya existe en Navidrome (ID: %s, %d pistas). Omitiendo.", item_type.lower(), album.album_name, album.artist_name, existing_album.get("id"), nav_cnt)
+                track_numbers = [t.get("track") for t in nav_tracks if t.get("track") and isinstance(t.get("track"), int)]
+                max_trkn = max(track_numbers) if track_numbers else nav_cnt
+                has_missing_gaps = False
+                if track_numbers and len(track_numbers) >= 2:
+                    expected_set = set(range(min(track_numbers), max(track_numbers) + 1))
+                    if len(expected_set) > len(track_numbers):
+                        has_missing_gaps = True
+
+                if is_single or (nav_cnt >= 8 and max_trkn <= nav_cnt and not has_missing_gaps):
+                    logger.info("El %s '%s' de '%s' ya existe completo en Navidrome (ID: %s, %d pistas). Omitiendo.", item_type.lower(), album.album_name, album.artist_name, existing_album.get("id"), nav_cnt)
                     skipped_count += 1
                     if getattr(queue, "state_tracker", None):
                         queue.state_tracker.mark_audited_complete(album.album_name, album.artist_name)
@@ -357,7 +365,7 @@ def process_download_job(queue: Any, job: DownloadJob):
                         )
                     continue
                 else:
-                    logger.info("El álbum '%s' solo tiene %d pista(s) en Navidrome. Procediendo a descargar para completarlo.", album.album_name, nav_cnt)
+                    logger.info("El álbum '%s' tiene %d pista(s) en Navidrome pero faltan pistas (max: %d, gaps: %s). Procediendo a descargar para completarlo.", album.album_name, nav_cnt, max_trkn, has_missing_gaps)
 
         # 2. Check local disk integrity
         is_single = getattr(album, "is_single", False) or is_single_release
