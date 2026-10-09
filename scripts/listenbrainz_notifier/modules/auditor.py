@@ -130,7 +130,7 @@ class IncompleteAlbumAuditor:
         all_albums: List[Dict[str, Any]] = []
         nav_offset = 0
         batch_size = 500
-        while len(all_albums) < 2500:
+        while True:
             batch = self.navidrome.get_album_list(type_="alphabeticalByName", size=batch_size, offset=nav_offset)
             if not batch:
                 break
@@ -176,8 +176,6 @@ class IncompleteAlbumAuditor:
 
             # Exclude recognized singles or special folders
             if alb_name.lower().startswith(("_singles", "single", "sencillo")) or single_keywords.search(alb_name) or single_keywords.search(artist_name):
-                if self.state_tracker:
-                    self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                 continue
 
             # Check if user ignored, persistently blocked, or already audited complete
@@ -207,8 +205,6 @@ class IncompleteAlbumAuditor:
                             has_full_duplicate = True
                             break
                 if has_full_duplicate:
-                    if self.state_tracker:
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                     continue
 
             # Check if already complete on disk
@@ -254,13 +250,11 @@ class IncompleteAlbumAuditor:
 
                         if resolved_alb:
                             if self.state_tracker and self.state_tracker.is_audited_complete(resolved_alb.album_name, resolved_alb.artist_name):
-                                self.state_tracker.mark_audited_complete(t_title, t_art)
                                 continue
 
                             if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name):
                                 if self.state_tracker:
                                     self.state_tracker.mark_audited_complete(resolved_alb.album_name, resolved_alb.artist_name)
-                                    self.state_tracker.mark_audited_complete(t_title, t_art)
                                 continue
 
                             incomplete.append({
@@ -273,10 +267,6 @@ class IncompleteAlbumAuditor:
                                 "resolved_album": resolved_alb,
                                 "source_compilation": alb_name,
                             })
-                        else:
-                            # If online resolver fails to find official album, mark track as audited to prevent infinite loop
-                            if self.resolver and self.state_tracker:
-                                self.state_tracker.mark_audited_complete(t_title, t_art)
                 continue
 
             # Regular artist album check
@@ -306,8 +296,6 @@ class IncompleteAlbumAuditor:
                     total_expected = total_tracks_meta
                 else:
                     # Standalone 1-track release / single -> not an incomplete album
-                    if self.state_tracker:
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
                     continue
             elif song_count >= 2:
                 if track_numbers:
@@ -327,8 +315,6 @@ class IncompleteAlbumAuditor:
                             total_expected = max_trkn
                         else:
                             # Sequence is complete!
-                            if self.state_tracker:
-                                self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                             continue
 
             if is_candidate:
@@ -352,7 +338,6 @@ class IncompleteAlbumAuditor:
 
                 if resolved_alb:
                     if self.state_tracker and self.state_tracker.is_audited_complete(resolved_alb.album_name, resolved_alb.artist_name, year=this_year):
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                         continue
 
                     if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name, year=this_year, expected_min_tracks=total_expected):
@@ -370,10 +355,6 @@ class IncompleteAlbumAuditor:
                         "cover_url": alb.get("coverArt") or getattr(resolved_alb, "cover_url", None),
                         "resolved_album": resolved_alb,
                     })
-                else:
-                    # Unresolvable on YTM -> mark audited to prevent infinite loop
-                    if self.state_tracker:
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
 
         logger.info("Auditoría de biblioteca: detectados %d álbum(es) incompletos (offset: %d).", len(incomplete), offset)
         return incomplete

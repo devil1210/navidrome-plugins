@@ -552,9 +552,10 @@ class StateTracker:
             base_key = f"{norm_art} - {norm_alb}"
             self.state["__audited_completed__"][base_key] = now_str
 
+    def clear_audited(self) -> int:
+        """Clears all entries from the audited complete list and returns the count cleared."""
+        count = len(self.state.get("__audited_completed__", {}))
+        self.state["__audited_completed__"] = {}
         self.save()
-        logger.debug("Marked album as audited complete: '%s' by '%s' (year: %s)", album_name, artist_name, year)
-
-
-
-
+        logger.info("Cleared all %d audited complete items from state", count)
+        return count
