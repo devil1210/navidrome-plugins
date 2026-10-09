@@ -17,6 +17,25 @@ from .state import StateTracker
 logger = logging.getLogger("listenbrainz_notifier")
 
 
+def _norm_album_key(s: str) -> str:
+    """Normalizes album name for robust comparison across romanizations and punctuation."""
+    clean = re.sub(r"^\[\d{4}\]\s*-\s*", "", s or "").strip()
+    clean = re.sub(r"[\"\'`’“”«»]", "", clean)
+    clean = re.sub(r"[\(\)\[\]\{\}]", " ", clean)
+    clean = clean.replace("&", " and ").replace("・", " ").replace("·", " ")
+    clean = re.sub(r"[^\w\s]", "", clean.lower())
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def _norm_artist_key(s: str) -> str:
+    """Normalizes artist name for multi-artist credit comparison."""
+    clean = re.sub(r"[\"\'`’“”«»]", "", s or "")
+    clean = re.sub(r"[\(\)\[\]\{\}]", " ", clean)
+    clean = clean.replace("&", " and ").replace("feat.", "and").replace("featuring", "and")
+    clean = re.sub(r"[^\w\s]", "", clean.lower())
+    return re.sub(r"\s+", " ", clean).strip()
+
+
 class IncompleteAlbumAuditor:
     """
     Audits the music library to discover incomplete studio albums.
@@ -39,10 +58,13 @@ class IncompleteAlbumAuditor:
 
     def _is_album_complete_on_disk(self, artist_name: str, album_name: str, expected_min_tracks: int = 1) -> bool:
         """Checks if an album folder with audio tracks already exists on disk in library_dir."""
-        if not self.library_dir or not self.library_dir.is_dir() or not artist_name or not album_name:
+        if not self.library_dir or not self.library_dir.is_dir() or not album_name:
             return False
-        clean_art = re.sub(r"[^\w\s]", "", str(artist_name).lower()).strip()
-        clean_alb = re.sub(r"[^\w\s]", "", str(album_name).lower()).strip()
+        clean_art = _norm_artist_key(artist_name)
+        clean_alb = _norm_album_key(album_name)
+        if not clean_alb:
+            return False
+
         for cat in ["General", "J-Music", "Compilaciones", "Soundtracks", "Soundtracks/Worldwide", "Soundtracks/J-Music"]:
             c_dir = self.library_dir / cat
             if not c_dir.is_dir():
@@ -50,12 +72,23 @@ class IncompleteAlbumAuditor:
             for art_dir in c_dir.iterdir():
                 if not art_dir.is_dir() or art_dir.name.startswith((".", "_")):
                     continue
-                if re.sub(r"[^\w\s]", "", art_dir.name.lower()).strip() == clean_art:
+                dir_art_k = _norm_artist_key(art_dir.name)
+                # Match artist if exact, substring, or if album is a soundtrack/compilation
+                artist_matches = (
+                    not clean_art
+                    or clean_art == dir_art_k
+                    or dir_art_k in clean_art
+                    or clean_art in dir_art_k
+                    or "soundtrack" in clean_alb
+                    or "soundtrack" in cat.lower()
+                    or "compilacion" in cat.lower()
+                )
+                if artist_matches:
                     for alb_dir in art_dir.iterdir():
                         if not alb_dir.is_dir() or alb_dir.name.startswith((".", "_")):
                             continue
-                        dir_alb = re.sub(r"^\[\d{4}\]\s*-\s*", "", alb_dir.name)
-                        if re.sub(r"[^\w\s]", "", dir_alb.lower()).strip() == clean_alb:
+                        dir_alb_k = _norm_album_key(alb_dir.name)
+                        if dir_alb_k == clean_alb or (len(clean_alb) > 6 and (clean_alb in dir_alb_k or dir_alb_k in clean_alb)):
                             try:
                                 audio_files = [f for f in alb_dir.glob("**/*") if f.is_file() and f.suffix.lower() in ('.m4a', '.mp3', '.flac')]
                                 if len(audio_files) >= expected_min_tracks and len(audio_files) >= 1:
@@ -89,6 +122,14 @@ class IncompleteAlbumAuditor:
 
         if not all_albums:
             all_albums = self.navidrome.get_album_list(type_="newest", size=500)
+
+        # Build album index by normalized key to detect duplicate/split cards in Navidrome
+        nav_albums_by_key: Dict[str, List[Dict[str, Any]]] = {}
+        for a in all_albums:
+            a_name = a.get("name") or a.get("title") or ""
+            ak = _norm_album_key(a_name)
+            if ak:
+                nav_albums_by_key.setdefault(ak, []).append(a)
 
         skipped_offset = 0
         generic_artists = {"various artists", "varios artistas", "compilaciones", "soundtrack", "soundtracks", "unknown", "unknown artist"}
@@ -126,6 +167,22 @@ class IncompleteAlbumAuditor:
                 if self.state_tracker.is_failed_blocked(alb_name, artist_name):
                     continue
                 if self.state_tracker.is_audited_complete(alb_name, artist_name):
+                    continue
+
+            # Check if another entry in Navidrome already has the full release of this album
+            alb_k = _norm_album_key(alb_name)
+            if alb_k in nav_albums_by_key:
+                has_full_duplicate = False
+                this_cnt = alb.get("songCount") or 0
+                for other_alb in nav_albums_by_key[alb_k]:
+                    if other_alb.get("id") != alb_id:
+                        other_cnt = other_alb.get("songCount") or 0
+                        if other_cnt >= 6 and other_cnt > this_cnt:
+                            has_full_duplicate = True
+                            break
+                if has_full_duplicate:
+                    if self.state_tracker:
+                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
                     continue
 
             # Check if already complete on disk

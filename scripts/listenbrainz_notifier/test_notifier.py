@@ -3261,6 +3261,34 @@ class TestPlaylistAligner(unittest.TestCase):
         self.assertEqual(incomplete[0]["album_name"], "Honestidad Brutal")
         self.assertEqual(incomplete[0]["artist_name"], "Andrés Calamaro")
 
+    def test_incomplete_album_auditor_skip_duplicate_complete_album(self):
+        from modules.auditor import IncompleteAlbumAuditor
+        from modules.state import StateTracker
+
+        mock_nav = MagicMock()
+        mock_nav.get_album_list.return_value = [
+            # Full 30-track release under Lyn
+            {"id": "alb_full", "name": "( Perusona 5 Za・roiyaru ) Original Soundtrack", "artist": "Lyn", "songCount": 30},
+            # Partial 5-track release under multi-artist
+            {"id": "alb_partial", "name": "\"Perusona 5 Za・roiyaru\" Original Soundtrack", "artist": "Lyn Inaizumi & ATLUS Sound Team", "songCount": 5},
+        ]
+        def mock_tracks(alb_id):
+            if alb_id == "alb_full":
+                return [{"id": f"f_{i}", "track": i, "totalTracks": 30} for i in range(1, 31)]
+            return [{"id": f"p_{i}", "track": i, "totalTracks": 30} for i in range(1, 6)]
+
+        mock_nav.get_album_tracks.side_effect = mock_tracks
+
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        auditor = IncompleteAlbumAuditor(
+            navidrome=mock_nav,
+            state_tracker=tracker,
+        )
+
+        incomplete = auditor.find_incomplete_albums()
+        # Should be empty because full 30-track version already exists in Navidrome
+        self.assertEqual(len(incomplete), 0)
+
     def test_nightly_download_manager_pipeline(self):
         from modules.nightly import NightlyDownloadManager
         from modules.state import StateTracker
