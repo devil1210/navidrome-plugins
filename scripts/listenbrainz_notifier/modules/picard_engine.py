@@ -725,8 +725,7 @@ class PicardEngine:
             return None
 
         def normalize_album_name(name: str) -> str:
-            n = re.sub(r"^\d{1,3}\s*[\.\-_\/:]*\s*", "", str(name)).strip()
-            n = re.sub(r"^\[\d{4}\]\s*-\s*", "", n).strip()
+            n = re.sub(r"^\[\d{4}\]\s*-\s*", "", str(name)).strip()
             n = re.sub(r"\s+\((?:single|ep)\)$", "", n, flags=re.IGNORECASE).strip()
             n = re.sub(r"[^\w\s]", "", n, flags=re.UNICODE).lower().strip()
             return re.sub(r"\s+", " ", n)
@@ -970,6 +969,23 @@ class PicardEngine:
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
 
+            existing_alb_tag = None
+            existing_day_tag = None
+            if existing_match:
+                for ef in dest_dir.iterdir():
+                    if ef.is_file() and ef.suffix.lower() == ".m4a" and MP4 is not None:
+                        try:
+                            m_ef = MP4(str(ef))
+                            if m_ef.tags:
+                                if "©alb" in m_ef.tags and m_ef.tags["©alb"]:
+                                    existing_alb_tag = m_ef.tags["©alb"]
+                                if "©day" in m_ef.tags and m_ef.tags["©day"]:
+                                    existing_day_tag = m_ef.tags["©day"]
+                                if existing_alb_tag:
+                                    break
+                        except Exception:
+                            pass
+
             for item in list(temp_album_dir.iterdir()):
                 dest_file_name = audio_rename_map.get(item.name, item.name)
                 target_dest_file = dest_dir / dest_file_name
@@ -994,7 +1010,27 @@ class PicardEngine:
                                 old_lrc = old_file.with_suffix(".lrc")
                                 if old_lrc.exists():
                                     cls.handle_deduplication(old_lrc, library_root)
+                        # Remove stale .part files for this track
+                        for part_f in list(dest_dir.glob("*.part")):
+                            if part_f.name.startswith(trk_prefix):
+                                try:
+                                    part_f.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
                 shutil.move(str(item), str(target_dest_file))
+
+                # Align MP4 tags with existing album in folder so Navidrome doesn't split the album
+                if target_dest_file.suffix.lower() == ".m4a" and MP4 is not None and (existing_alb_tag or existing_day_tag):
+                    try:
+                        m_target = MP4(str(target_dest_file))
+                        if m_target.tags:
+                            if existing_alb_tag:
+                                m_target.tags["©alb"] = existing_alb_tag
+                            if existing_day_tag:
+                                m_target.tags["©day"] = existing_day_tag
+                            m_target.save()
+                    except Exception:
+                        pass
 
             shutil.rmtree(str(temp_album_dir), ignore_errors=True)
 

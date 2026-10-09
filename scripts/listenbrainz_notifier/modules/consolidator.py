@@ -159,6 +159,24 @@ class FolderConsolidator:
                                 pass
                         continue
 
+                    # Inspect existing canonical audio file tags
+                    can_alb_tag = None
+                    can_day_tag = None
+                    try:
+                        from mutagen.mp4 import MP4
+                        for cf in canonical.iterdir():
+                            if cf.is_file() and cf.suffix.lower() == ".m4a":
+                                m_cf = MP4(str(cf))
+                                if m_cf.tags:
+                                    if "©alb" in m_cf.tags and m_cf.tags["©alb"]:
+                                        can_alb_tag = m_cf.tags["©alb"]
+                                    if "©day" in m_cf.tags and m_cf.tags["©day"]:
+                                        can_day_tag = m_cf.tags["©day"]
+                                    if can_alb_tag:
+                                        break
+                    except Exception:
+                        pass
+
                     for f in audio_files:
                         dest_file = canonical / f.name
                         if dest_file.exists():
@@ -179,7 +197,27 @@ class FolderConsolidator:
                         if not dry_run:
                             try:
                                 canonical.mkdir(parents=True, exist_ok=True)
+                                # Remove stale .part files for this track
+                                m_num = re.match(r"^(\d{1,2})\s*-\s*", f.name)
+                                if m_num:
+                                    trk_pfx = f"{int(m_num.group(1)):02d} - "
+                                    for part_f in list(canonical.glob("*.part")):
+                                        if part_f.name.startswith(trk_pfx):
+                                            part_f.unlink(missing_ok=True)
                                 shutil.move(str(f), str(dest_file))
+                                # Align tags
+                                if dest_file.suffix.lower() == ".m4a" and (can_alb_tag or can_day_tag):
+                                    try:
+                                        from mutagen.mp4 import MP4
+                                        m_dest = MP4(str(dest_file))
+                                        if m_dest.tags:
+                                            if can_alb_tag:
+                                                m_dest.tags["©alb"] = can_alb_tag
+                                            if can_day_tag:
+                                                m_dest.tags["©day"] = can_day_tag
+                                            m_dest.save()
+                                    except Exception:
+                                        pass
                                 moved_files_total += 1
                             except Exception as me:
                                 logger.warning("No se pudo mover archivo '%s' a '%s': %s", f.name, canonical, me)
