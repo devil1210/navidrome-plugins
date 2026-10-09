@@ -523,20 +523,37 @@ class StateTracker:
         inc = self.state.get("__incomplete_batch__", {})
         return inc.get("items", []) if isinstance(inc, dict) else []
 
-    def is_audited_complete(self, album_name: str, artist_name: str) -> bool:
+    def is_audited_complete(self, album_name: str, artist_name: str, year: Optional[int] = None) -> bool:
         """Returns True if the album has already been audited/downloaded and verified complete."""
-        norm_key = f"{self._normalize_ignore_str(artist_name)} - {self._normalize_ignore_str(album_name)}"
+        norm_art = self._normalize_ignore_str(artist_name)
+        norm_alb = self._normalize_ignore_str(album_name)
         audited = self.state.get("__audited_completed__", {})
-        return norm_key in audited
 
-    def mark_audited_complete(self, album_name: str, artist_name: str):
+        if year and year > 0:
+            key_with_yr = f"{norm_art} - {norm_alb} ({year})"
+            if key_with_yr in audited:
+                return True
+
+        base_key = f"{norm_art} - {norm_alb}"
+        return base_key in audited
+
+    def mark_audited_complete(self, album_name: str, artist_name: str, year: Optional[int] = None):
         """Marks an album as verified complete so the auditor doesn't repeatedly propose it."""
-        norm_key = f"{self._normalize_ignore_str(artist_name)} - {self._normalize_ignore_str(album_name)}"
+        norm_art = self._normalize_ignore_str(artist_name)
+        norm_alb = self._normalize_ignore_str(album_name)
         if "__audited_completed__" not in self.state:
             self.state["__audited_completed__"] = {}
-        self.state["__audited_completed__"][norm_key] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if year and year > 0:
+            key_with_yr = f"{norm_art} - {norm_alb} ({year})"
+            self.state["__audited_completed__"][key_with_yr] = now_str
+        else:
+            base_key = f"{norm_art} - {norm_alb}"
+            self.state["__audited_completed__"][base_key] = now_str
+
         self.save()
-        logger.debug("Marked album as audited complete: '%s' by '%s'", album_name, artist_name)
+        logger.debug("Marked album as audited complete: '%s' by '%s' (year: %s)", album_name, artist_name, year)
 
 
 

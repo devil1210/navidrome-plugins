@@ -3289,6 +3289,35 @@ class TestPlaylistAligner(unittest.TestCase):
         # Should be empty because full 30-track version already exists in Navidrome
         self.assertEqual(len(incomplete), 0)
 
+    def test_incomplete_album_auditor_respects_different_years(self):
+        from modules.auditor import IncompleteAlbumAuditor
+        from modules.state import StateTracker
+
+        mock_nav = MagicMock()
+        mock_nav.get_album_list.return_value = [
+            # 2005 release (complete with 15 tracks)
+            {"id": "alb_2005", "name": "Greatest Hits", "artist": "Band", "year": 2005, "songCount": 15},
+            # 2022 release (incomplete with 2 tracks out of 10)
+            {"id": "alb_2022", "name": "Greatest Hits", "artist": "Band", "year": 2022, "songCount": 2},
+        ]
+        def mock_tracks(alb_id):
+            if alb_id == "alb_2005":
+                return [{"id": f"a_{i}", "track": i, "totalTracks": 15} for i in range(1, 16)]
+            return [{"id": "b_1", "track": 1, "totalTracks": 10}, {"id": "b_2", "track": 2, "totalTracks": 10}]
+
+        mock_nav.get_album_tracks.side_effect = mock_tracks
+
+        tracker = StateTracker(state_file=Path(tempfile.mktemp(suffix=".json")))
+        auditor = IncompleteAlbumAuditor(
+            navidrome=mock_nav,
+            state_tracker=tracker,
+        )
+
+        incomplete = auditor.find_incomplete_albums()
+        # 2022 release should be detected as incomplete because 2005 is a different era!
+        self.assertEqual(len(incomplete), 1)
+        self.assertEqual(incomplete[0]["id"], "alb_2022")
+
     def test_nightly_download_manager_pipeline(self):
         from modules.nightly import NightlyDownloadManager
         from modules.state import StateTracker

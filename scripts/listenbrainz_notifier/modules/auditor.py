@@ -56,7 +56,7 @@ class IncompleteAlbumAuditor:
         self.library_dir = Path(library_dir) if library_dir else None
         self.resolver = resolver
 
-    def _is_album_complete_on_disk(self, artist_name: str, album_name: str, expected_min_tracks: int = 1) -> bool:
+    def _is_album_complete_on_disk(self, artist_name: str, album_name: str, year: Optional[int] = None, expected_min_tracks: int = 1) -> bool:
         """Checks if an album folder with audio tracks already exists on disk in library_dir."""
         if not self.library_dir or not self.library_dir.is_dir() or not album_name:
             return False
@@ -87,6 +87,18 @@ class IncompleteAlbumAuditor:
                     for alb_dir in art_dir.iterdir():
                         if not alb_dir.is_dir() or alb_dir.name.startswith((".", "_")):
                             continue
+
+                        # Respect release year if folder has [YYYY] prefix and year is provided
+                        year_match = re.match(r"^\[(\d{4})\]\s*-\s*", alb_dir.name)
+                        if year and year > 0 and year_match:
+                            try:
+                                dir_yr = int(year_match.group(1))
+                                if abs(year - dir_yr) > 1:
+                                    # Different release year era (e.g. 2004 vs 2022)
+                                    continue
+                            except Exception:
+                                pass
+
                         dir_alb_k = _norm_album_key(alb_dir.name)
                         if dir_alb_k == clean_alb or (len(clean_alb) > 6 and (clean_alb in dir_alb_k or dir_alb_k in clean_alb)):
                             try:
@@ -146,6 +158,7 @@ class IncompleteAlbumAuditor:
             alb_name = alb.get("name") or alb.get("title") or ""
             artist_name = alb.get("artist") or alb.get("displayArtist") or ""
             alb_id = alb.get("id")
+            this_year = alb.get("year") or 0
 
             if not alb_name or not alb_id:
                 continue
@@ -157,7 +170,7 @@ class IncompleteAlbumAuditor:
             # Exclude recognized singles or special folders
             if alb_name.lower().startswith(("_singles", "single", "sencillo")) or single_keywords.search(alb_name) or single_keywords.search(artist_name):
                 if self.state_tracker:
-                    self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                    self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                 continue
 
             # Check if user ignored, persistently blocked, or already audited complete
@@ -166,10 +179,10 @@ class IncompleteAlbumAuditor:
                     continue
                 if self.state_tracker.is_failed_blocked(alb_name, artist_name):
                     continue
-                if self.state_tracker.is_audited_complete(alb_name, artist_name):
+                if self.state_tracker.is_audited_complete(alb_name, artist_name, year=this_year):
                     continue
 
-            # Check if another entry in Navidrome already has the full release of this album
+            # Check if another entry in Navidrome already has the full release of this album (respecting release year)
             alb_k = _norm_album_key(alb_name)
             if alb_k in nav_albums_by_key:
                 has_full_duplicate = False
@@ -177,18 +190,24 @@ class IncompleteAlbumAuditor:
                 for other_alb in nav_albums_by_key[alb_k]:
                     if other_alb.get("id") != alb_id:
                         other_cnt = other_alb.get("songCount") or 0
+                        other_year = other_alb.get("year") or 0
+
+                        # If both have explicit release years and differ by > 1 year, they are distinct albums from different eras
+                        if this_year > 0 and other_year > 0 and abs(this_year - other_year) > 1:
+                            continue
+
                         if other_cnt >= 6 and other_cnt > this_cnt:
                             has_full_duplicate = True
                             break
                 if has_full_duplicate:
                     if self.state_tracker:
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                     continue
 
             # Check if already complete on disk
-            if self._is_album_complete_on_disk(artist_name, alb_name):
+            if self._is_album_complete_on_disk(artist_name, alb_name, year=this_year):
                 if self.state_tracker:
-                    self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                    self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                 continue
 
             # Fetch tracks from Navidrome
@@ -302,7 +321,7 @@ class IncompleteAlbumAuditor:
                         else:
                             # Sequence is complete!
                             if self.state_tracker:
-                                self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                                self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                             continue
 
             if is_candidate:
@@ -325,14 +344,14 @@ class IncompleteAlbumAuditor:
                     )
 
                 if resolved_alb:
-                    if self.state_tracker and self.state_tracker.is_audited_complete(resolved_alb.album_name, resolved_alb.artist_name):
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                    if self.state_tracker and self.state_tracker.is_audited_complete(resolved_alb.album_name, resolved_alb.artist_name, year=this_year):
+                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                         continue
 
-                    if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name, expected_min_tracks=total_expected):
+                    if self._is_album_complete_on_disk(resolved_alb.artist_name, resolved_alb.album_name, year=this_year, expected_min_tracks=total_expected):
                         if self.state_tracker:
-                            self.state_tracker.mark_audited_complete(resolved_alb.album_name, resolved_alb.artist_name)
-                            self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                            self.state_tracker.mark_audited_complete(resolved_alb.album_name, resolved_alb.artist_name, year=this_year)
+                            self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
                         continue
 
                     incomplete.append({
@@ -347,7 +366,7 @@ class IncompleteAlbumAuditor:
                 else:
                     # Unresolvable on YTM -> mark audited to prevent infinite loop
                     if self.state_tracker:
-                        self.state_tracker.mark_audited_complete(alb_name, artist_name)
+                        self.state_tracker.mark_audited_complete(alb_name, artist_name, year=this_year)
 
         logger.info("Auditoría de biblioteca: detectados %d álbum(es) incompletos (offset: %d).", len(incomplete), offset)
         return incomplete
