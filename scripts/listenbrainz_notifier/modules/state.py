@@ -239,6 +239,7 @@ class StateTracker:
         import unicodedata
         nfkd = unicodedata.normalize("NFKD", text)
         clean = "".join([c for c in nfkd if not unicodedata.combining(c)])
+        clean = clean.replace("_", " ")
         clean = re.sub(r"[^\w\s]", " ", clean.lower())
         return " ".join(clean.split())
 
@@ -548,9 +549,12 @@ class StateTracker:
         if year and year > 0:
             key_with_yr = f"{norm_art} - {norm_alb} ({year})"
             self.state["__audited_completed__"][key_with_yr] = now_str
-        else:
-            base_key = f"{norm_art} - {norm_alb}"
-            self.state["__audited_completed__"][base_key] = now_str
+        base_key = f"{norm_art} - {norm_alb}"
+        self.state["__audited_completed__"][base_key] = now_str
+        try:
+            self.save()
+        except Exception as e:
+            logger.debug("Error saving audited complete to state: %s", e)
 
     def clear_audited(self) -> int:
         """Clears all entries from the audited complete list and returns the count cleared."""

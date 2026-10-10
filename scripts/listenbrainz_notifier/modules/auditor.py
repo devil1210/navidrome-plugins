@@ -23,7 +23,8 @@ def _norm_album_key(s: str) -> str:
     clean = re.sub(r"[\"\'`’“”«»]", "", clean)
     clean = re.sub(r"[\(\)\[\]\{\}]", " ", clean)
     clean = clean.replace("&", " and ").replace("・", " ").replace("·", " ")
-    clean = re.sub(r"[^\w\s]", "", clean.lower())
+    clean = clean.replace("_", " ")
+    clean = re.sub(r"[^a-zA-Z0-9\s\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]", " ", clean.lower())
     return re.sub(r"\s+", " ", clean).strip()
 
 
@@ -32,7 +33,8 @@ def _norm_artist_key(s: str) -> str:
     clean = re.sub(r"[\"\'`’“”«»]", "", s or "")
     clean = re.sub(r"[\(\)\[\]\{\}]", " ", clean)
     clean = clean.replace("&", " and ").replace("feat.", "and").replace("featuring", "and")
-    clean = re.sub(r"[^\w\s]", "", clean.lower())
+    clean = clean.replace("_", " ")
+    clean = re.sub(r"[^a-zA-Z0-9\s\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]", " ", clean.lower())
     return re.sub(r"\s+", " ", clean).strip()
 
 
