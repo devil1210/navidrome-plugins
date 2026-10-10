@@ -340,11 +340,12 @@ class UniversalResolver:
                     pl = self.yt.get_playlist(list_id)
                     title = pl.get("title") or "Álbum de YouTube"
                     author_obj = pl.get("author")
-                    author = author_obj.get("name", "Various Artists") if isinstance(author_obj, dict) else (author_obj or "Various Artists")
+                    author = author_obj.get("name", "") if isinstance(author_obj, dict) else (author_obj or "")
                     tracks: List[str] = []
                     album_year = None
                     album_browse_id = None
                     track_artists = set()
+                    has_official_artist = False
 
                     for t in pl.get("tracks", []):
                         if t.get("title"):
@@ -366,20 +367,32 @@ class UniversalResolver:
                                     album_year = str(alb_details["year"])
                                 alb_artists = alb_details.get("artists")
                                 if isinstance(alb_artists, list) and alb_artists and isinstance(alb_artists[0], dict) and alb_artists[0].get("name"):
-                                    author = alb_artists[0]["name"]
+                                    official_name = alb_artists[0]["name"].strip()
+                                    if official_name:
+                                        author = official_name
+                                        if author.lower() not in ("various artists", "varios artistas", "unknown", "compilacion", "compilaciones"):
+                                            has_official_artist = True
                         except Exception as e:
                             logger.debug("Error fetching album details for %s: %s", album_browse_id, e)
 
-                    # Determine if it's a compilation / Various Artists
-                    is_compilation = (
-                        len(track_artists) > 1
-                        or (author and author.lower() in ("various artists", "varios artistas", "compilacion", "compilaciones"))
-                    )
+                    generic_artists = ("various artists", "varios artistas", "unknown", "compilacion", "compilaciones")
 
-                    if is_compilation:
+                    # If official album metadata specified a concrete artist (e.g. Metallica in The Metallica Blacklist),
+                    # respect it. Only fallback to 'Various Artists' compilation if there is no explicit album artist
+                    # or if the official album artist is explicitly 'Various Artists'.
+                    if has_official_artist:
+                        is_compilation = False
+                    elif author and author.lower() not in generic_artists:
+                        is_compilation = False
+                    elif len(track_artists) > 1 or (author and author.lower() in generic_artists):
                         author = "Various Artists"
-                    elif len(track_artists) == 1 and (not author or author.lower() in ("various artists", "varios artistas", "unknown")):
+                        is_compilation = True
+                    elif len(track_artists) == 1:
                         author = list(track_artists)[0]
+                        is_compilation = False
+                    else:
+                        author = "Various Artists"
+                        is_compilation = True
 
                     thumb_url = None
                     thumbs = pl.get("thumbnails", [])
