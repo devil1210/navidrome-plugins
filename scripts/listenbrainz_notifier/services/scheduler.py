@@ -6,6 +6,7 @@ Periodically checks Navidrome playlists and triggers sync notifications.
 
 import gc
 import logging
+from pathlib import Path
 import threading
 import time
 from typing import Any, Set
