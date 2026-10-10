@@ -342,11 +342,44 @@ class UniversalResolver:
                     author_obj = pl.get("author")
                     author = author_obj.get("name", "Various Artists") if isinstance(author_obj, dict) else (author_obj or "Various Artists")
                     tracks: List[str] = []
-                    if pl.get("tracks"):
-                        first_trk = pl["tracks"][0]
-                        if first_trk.get("artists"):
-                            author = first_trk["artists"][0].get("name", author)
-                        tracks = [t.get("title") for t in pl["tracks"] if t.get("title")]
+                    album_year = None
+                    album_browse_id = None
+                    track_artists = set()
+
+                    for t in pl.get("tracks", []):
+                        if t.get("title"):
+                            tracks.append(t["title"])
+                        if not album_browse_id and t.get("album") and isinstance(t["album"], dict) and t["album"].get("id"):
+                            album_browse_id = t["album"]["id"]
+                        for a in t.get("artists", []):
+                            if isinstance(a, dict) and a.get("name"):
+                                track_artists.add(a["name"].strip())
+
+                    # If album browse ID is found, query official album metadata for exact artist/year
+                    if album_browse_id:
+                        try:
+                            alb_details = self._get_album_details(album_browse_id)
+                            if alb_details:
+                                if alb_details.get("title"):
+                                    title = alb_details["title"]
+                                if alb_details.get("year"):
+                                    album_year = str(alb_details["year"])
+                                alb_artists = alb_details.get("artists")
+                                if isinstance(alb_artists, list) and alb_artists and isinstance(alb_artists[0], dict) and alb_artists[0].get("name"):
+                                    author = alb_artists[0]["name"]
+                        except Exception as e:
+                            logger.debug("Error fetching album details for %s: %s", album_browse_id, e)
+
+                    # Determine if it's a compilation / Various Artists
+                    is_compilation = (
+                        len(track_artists) > 1
+                        or (author and author.lower() in ("various artists", "varios artistas", "compilacion", "compilaciones"))
+                    )
+
+                    if is_compilation:
+                        author = "Various Artists"
+                    elif len(track_artists) == 1 and (not author or author.lower() in ("various artists", "varios artistas", "unknown")):
+                        author = list(track_artists)[0]
 
                     thumb_url = None
                     thumbs = pl.get("thumbnails", [])
@@ -374,6 +407,7 @@ class UniversalResolver:
                         tracks=tracks,
                         is_single=False,
                         cover_url=thumb_url,
+                        year=int(album_year) if album_year and str(album_year).isdigit() else None,
                     )
                     return {
                         "status": "success",
