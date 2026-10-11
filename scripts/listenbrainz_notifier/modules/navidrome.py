@@ -270,10 +270,6 @@ class NavidromeClient:
                 # 2. Exact full title match (e.g. "x deluxe edition" == "x deluxe edition")
                 elif norm_full_album and norm_cand_full and norm_cand_full == norm_full_album:
                     name_match = True
-                # 3. Substring matching ONLY if both core titles are at least 4 chars long
-                elif len(norm_target_album) >= 4 and len(norm_cand_name) >= 4:
-                    if norm_target_album in norm_cand_name or norm_cand_name in norm_target_album:
-                        name_match = True
 
             if not name_match:
                 continue

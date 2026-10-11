@@ -165,6 +165,18 @@ def process_download_job(queue: Any, job: DownloadJob):
         if queue.navidrome:
             try:
                 existing_album = queue.navidrome.find_album_match(album.album_name, album.artist_name, strict_artist=True)
+                if existing_album:
+                    ex_name = existing_album.get("name") or existing_album.get("title") or ""
+                    def _norm_title(s: str) -> str:
+                        s_clean = re.sub(r"\s*[\(\[].*?[\)\]]", "", s or "").strip()
+                        s_clean = re.sub(r"\s*-\s*(deluxe|expanded|anniversary|remastered|bonus track|edition|version).*", "", s_clean, flags=re.I).strip()
+                        return re.sub(r"[^\w\s]", "", s_clean.lower()).strip()
+                    if ex_name and _norm_title(ex_name) != _norm_title(album.album_name):
+                        logger.warning(
+                            "Descartando coincidencia aproximada de Navidrome: '%s' no es idéntico a '%s'",
+                            ex_name, album.album_name
+                        )
+                        existing_album = None
             except Exception as ex:
                 logger.warning("Error comprobando álbum en Navidrome: %s", ex)
 
